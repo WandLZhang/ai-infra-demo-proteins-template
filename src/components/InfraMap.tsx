@@ -6,6 +6,13 @@ import { BACKENDS } from '../backends'
 import { HUD_MAP_STYLES } from '../mapStyles'
 import { useConfig, theme } from '../config'
 
+// Must be module-level, not an inline literal in the useJsApiLoader call. A fresh array on
+// every render makes the loader think its config changed, so it reloads the Maps script and
+// remounts this subtree — which tears down the 3Dmol protein viewer with it. Symptom: navigate
+// away from a slide and back and the protein never returns, console full of
+// "LoadScript has been reloaded unintentionally".
+const MAPS_LIBRARIES: ('places')[] = ['places']
+
 // Geographic center of CONUS — used to position the multi-region bucket label over the polygon.
 const US_BUCKET_LABEL_POSITION: google.maps.LatLngLiteral = { lat: 39.83, lng: -98.58 }
 
@@ -139,7 +146,7 @@ const US_FEATURE_STYLE: google.maps.FeatureStyleOptions = {
 
 export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, center, zoom, homePosition, highlightUS, showSpokes, showHalos, mdLayer, showHyperdiskHub, showPartitionChips, showSliceViz }: InfraMapProps) {
   const { config } = useConfig()
-  const { isLoaded } = useJsApiLoader({ googleMapsApiKey: MAPS_API_KEY, libraries: ['places'] })
+  const { isLoaded } = useJsApiLoader({ googleMapsApiKey: MAPS_API_KEY, libraries: MAPS_LIBRARIES })
 
   // Two map instances stacked, cross-fade between them.
   const mapARef = useRef<google.maps.Map | null>(null)
