@@ -21,7 +21,8 @@ function formatEastern(isoTs: string): string {
     timeZone: 'America/New_York',
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
-    hour12: false,
+    // h23, not hour12:false: the latter resolves to h24 in some engines and prints midnight as 24.
+    hourCycle: 'h23',
     timeZoneName: 'short',
   }).formatToParts(d)
   const lookup: Record<string, string> = {}
@@ -57,6 +58,8 @@ export default function ProteinViewer({ visible }: ProteinViewerProps) {
     const fail = (why: string, err?: unknown) => {
       if (cancelled) return
       console.warn(`ProteinViewer: ${why}`, err ?? '')
+      // A structure already on screen stays there; one failed refresh isn't worth covering it.
+      if (lastUpdatedRef.current) return
       setPhase('error')
     }
 
@@ -75,6 +78,8 @@ export default function ProteinViewer({ visible }: ProteinViewerProps) {
       })
 
       await refreshIfNew()
+      // The slide may have been left while that fetch ran; a late interval would outlive the visit.
+      if (cancelled) return
       pollId = setInterval(refreshIfNew, POLL_INTERVAL_MS)
     }
 

@@ -49,6 +49,8 @@ export interface SlurmEvent {
   protein_id?: string
   seq_len?: number
   error?: string
+  /** GCS object name, set by pollEvents. Unique per event, so it keys de-duplication. */
+  _name?: string
 }
 
 const ALL_BACKENDS: BackendId[] = [
@@ -56,7 +58,8 @@ const ALL_BACKENDS: BackendId[] = [
 ]
 
 async function fetchGcsJson(path: string): Promise<any | null> {
-  const resp = await fetch(`${GCS_BASE}/${path}?t=${Date.now()}`, { cache: 'no-store' })
+  // A timeout so one hung request can't stall the one-at-a-time poll loop.
+  const resp = await fetch(`${GCS_BASE}/${path}?t=${Date.now()}`, { cache: 'no-store', signal: AbortSignal.timeout(8000) })
   if (!resp.ok) return null
   return resp.json()
 }
@@ -89,21 +92,24 @@ export async function pollStatus(): Promise<JobStatus> {
   return { lanes, all_complete }
 }
 
-export async function pollEvents(): Promise<SlurmEvent[]> {
+// Names of the event objects currently in the run log, sorted, slurmctld events excluded.
+export async function listEventNames(): Promise<string[]> {
   const listResp = await fetch(
     `https://storage.googleapis.com/storage/v1/b/${GCS_BUCKET}/o?prefix=job/log/&delimiter=/&t=${Date.now()}`,
-    { cache: 'no-store' }
+    { cache: 'no-store', signal: AbortSignal.timeout(8000) }
   )
   if (!listResp.ok) return []
   const listData = await listResp.json()
   const allItems: { name: string }[] = listData.items || []
-  const items = allItems.filter(i => !i.name.includes('slurmctld'))
-  items.sort((a, b) => a.name.localeCompare(b.name))
+  return allItems.map(i => i.name).filter(n => !n.includes('slurmctld')).sort((a, b) => a.localeCompare(b))
+}
 
+export async function pollEvents(): Promise<SlurmEvent[]> {
+  const names = await listEventNames()
   const events: SlurmEvent[] = await Promise.all(
-    items.map(async (item) => {
-      const data = await fetchGcsJson(item.name)
-      return data as SlurmEvent | null
+    names.map(async (name) => {
+      const data = await fetchGcsJson(name)
+      return data ? ({ ...data, _name: name } as SlurmEvent) : null
     })
   ).then(results => results.filter(Boolean) as SlurmEvent[])
 

@@ -8,7 +8,7 @@ import InfoButton from './components/InfoButton'
 import ProteinViewer from './components/ProteinViewer'
 import type { Protein, ModelId, BackendId, LaneStatus, PredictResponse } from './types'
 import { BACKENDS } from './backends'
-import { submitRun, pollStatus, pollEvents, pollTpuStatus, type TpuStatus } from './api'
+import { submitRun, pollStatus, pollEvents, listEventNames, pollTpuStatus, type TpuStatus } from './api'
 import { theme, accentAlpha, useConfig } from './config'
 import SetupWizard from './components/SetupWizard'
 
@@ -48,7 +48,7 @@ export default function App() {
   const lineQueue = useRef<import('./api').SlurmEvent[]>([])
   const dripRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [zoneStates, setZoneStates] = useState<Record<string, MarkerState>>({})
-  const [vmStates, setVmStates] = useState<Record<string, { name: string, zone: string, state: string, href: string }>>({})
+  const [vmStates, setVmStates] = useState<Record<string, { name: string, zone: string, state: string, href: string, partition?: string }>>({})
   const [tpuStatus, setTpuStatus] = useState<TpuStatus | null>(null)
 
   const isMd = phase === 'md1' || phase === 'md2' || phase === 'md3'
@@ -75,11 +75,10 @@ export default function App() {
   const showPartitionChips = phase === 'pd2'
   const showSliceViz = phase === 'img'
 
-  const lastEventCount = useRef(0)
-  // Wall-clock ms of this tab's submit. Events stamped before it belong to the previous run,
-  // which the backend hasn't wiped yet on the first poll. 0 means keep everything (attaching
-  // to a run already in flight).
-  const runStartedAt = useRef(0)
+  // GCS names of event objects already queued for this run, or belonging to an earlier run.
+  const seenEvents = useRef<Set<string>>(new Set())
+  // Bumped by every startPolling. A poll that began under an older run drops its results.
+  const pollGen = useRef(0)
   // True once this tab has seen a lane in a live state during the current run. The first poll lands
   // before predict.sh clears the previous run's blobs, which all read done or failed, so stopping on
   // all_complete alone ended polling about 2 s into every run and froze the terminal and ladder.
@@ -100,7 +99,6 @@ export default function App() {
   const startPolling = useCallback(() => {
     if (pollRef.current) clearInterval(pollRef.current)
     if (dripRef.current) clearTimeout(dripRef.current)
-    lastEventCount.current = 0
     lineQueue.current = []
     terminalDone.current = false
     sawRunActive.current = false
@@ -170,14 +168,14 @@ export default function App() {
               setVmStates(prev => {
                 const existing = prev[ev.vm!]
                 if (existing && (existing.state === 'active' || existing.state === 'done')) return prev
-                return { ...prev, [ev.vm!]: { name: ev.vm!, zone: region, state: 'provisioning', href: existing?.href || consoleUrl(ev) } }
+                return { ...prev, [ev.vm!]: { name: ev.vm!, zone: region, state: 'provisioning', href: existing?.href || consoleUrl(ev), partition: ev.partition || existing?.partition } }
               })
             }
             break
           case 'allocate':
             if (ev.vm) {
               setZoneStates(prev => ({ ...prev, [region]: 'active' }))
-              setVmStates(prev => ({ ...prev, [ev.vm!]: { name: ev.vm!, zone: region, state: 'active', href: consoleUrl(ev) } }))
+              setVmStates(prev => ({ ...prev, [ev.vm!]: { name: ev.vm!, zone: region, state: 'active', href: consoleUrl(ev), partition: ev.partition || prev[ev.vm!]?.partition } }))
             }
             break
           case 'done':
@@ -223,6 +221,7 @@ export default function App() {
       dripRef.current = setTimeout(drainNext, delay) as any
     }
     dripRef.current = setTimeout(drainNext, 500) as any
+    const gen = ++pollGen.current
     pollRef.current = setInterval(async () => {
       if (pollBusy.current) return
       pollBusy.current = true
@@ -231,38 +230,39 @@ export default function App() {
           pollStatus(),
           pollEvents(),
         ])
+        // A newer run started while this poll was in flight: its refs aren't ours to touch.
+        if (gen !== pollGen.current) return
 
-        // predict.sh wipes the log at the start of every run, so a shorter list means a new
-        // run began. Without the reset the counter stays pinned at the old length and the
-        // terminal goes silent until the new run outgrows it.
-        if (events.length < lastEventCount.current) lastEventCount.current = 0
-        if (events.length > lastEventCount.current) {
-          const cutoff = runStartedAt.current
-          const newEvents = events.slice(lastEventCount.current)
-            .filter(e => e.type !== 'node_up' && e.type !== 'slurmctld')
-            .filter(e => !cutoff || !e.ts || new Date(e.ts).getTime() >= cutoff)
-          if (newEvents.length > 0) {
-            lineQueue.current.push(...newEvents)
-          }
-          lastEventCount.current = events.length
-        }
-
-        // Update side ladder directly from GCS backend blobs (authoritative, not drip-delayed)
-        for (const [bid, blob] of Object.entries(status.lanes)) {
-          const backendId = bid as BackendId
-          if (!BACKENDS.some(b => b.id === backendId)) continue
-          const s = blob.state as LaneStatus['state']
-          if (s === 'done' || s === 'failed') {
-            setLanes(prev => {
-              if (prev[backendId]?.state === s) return prev
-              return { ...prev, [backendId]: { ...prev[backendId], state: s, elapsedMs: blob.elapsed_ms || 0, costAccumulated: blob.cost_accumulated || 0, completedAt: blob.completed_at ? new Date(blob.completed_at).getTime() : null } }
-            })
-          }
-        }
+        // Queue each event object once, keyed by its GCS name. A running count broke two ways: a
+        // transient fetch failure shortened the list and replayed the whole log, and a late write
+        // that sorted into the middle was skipped. Names already seen at submit are the previous
+        // run's, so the first poll, which lands before predict.sh wipes the log, replays none.
+        const fresh = events.filter(e => e._name && !seenEvents.current.has(e._name))
+        for (const e of fresh) seenEvents.current.add(e._name!)
+        const visible = fresh.filter(e => e.type !== 'node_up' && e.type !== 'slurmctld')
+        if (visible.length > 0) lineQueue.current.push(...visible)
 
         if (Object.values(status.lanes).some(b => b.state !== 'done' && b.state !== 'failed' && b.state !== 'idle')) {
           sawRunActive.current = true
         }
+
+        // Update the side ladder directly from the GCS lane blobs (authoritative, not drip-delayed),
+        // but only once this run is live. Until predict.sh resets them, the blobs still hold the
+        // previous run's finished lanes and costs.
+        if (sawRunActive.current) {
+          for (const [bid, blob] of Object.entries(status.lanes)) {
+            const backendId = bid as BackendId
+            if (!BACKENDS.some(b => b.id === backendId)) continue
+            const s = blob.state as LaneStatus['state']
+            if (s === 'done' || s === 'failed') {
+              setLanes(prev => {
+                if (prev[backendId]?.state === s) return prev
+                return { ...prev, [backendId]: { ...prev[backendId], state: s, elapsedMs: blob.elapsed_ms || 0, costAccumulated: blob.cost_accumulated || 0, completedAt: blob.completed_at ? new Date(blob.completed_at).getTime() : null } }
+              })
+            }
+          }
+        }
+
         if (status.all_complete && sawRunActive.current) {
           if (pollRef.current) clearInterval(pollRef.current)
           pollRef.current = null
@@ -270,7 +270,7 @@ export default function App() {
       } catch (err) {
         console.error('Poll error:', err)
       } finally {
-        pollBusy.current = false
+        if (gen === pollGen.current) pollBusy.current = false
       }
     }, 2000)
   }, [])
@@ -299,11 +299,14 @@ export default function App() {
 
   const handleSubmit = useCallback(async () => {
     setSubmitError(null)
-    const submittedAt = Date.now()
     try {
+      // Every event object already in the log belongs to an earlier run. Mark them seen before
+      // submitting. Keyed on object names rather than timestamps, so a presenter laptop with a
+      // skewed clock can't drop the new run's events.
+      const stale = await listEventNames().catch(() => [] as string[])
       const result = await submitRun(currentProtein.id)
-      // 30 s of slack covers browser-to-backend clock skew.
-      runStartedAt.current = result.already_running ? 0 : submittedAt - 30_000
+      // Attaching to a run already in flight: replay its events instead of hiding them.
+      seenEvents.current = new Set(result.already_running ? [] : stale)
       // already_running = the server saw an in-flight run and didn't write a
       // new trigger. Skip the local-state reset and just attach to the
       // existing run via polling. Without this skip, a second-presser's tab

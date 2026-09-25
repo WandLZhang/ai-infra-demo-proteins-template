@@ -103,7 +103,7 @@ export const ZONE_LOCATIONS: ZoneInfo[] = [
 interface InfraMapProps {
   lanes: Record<BackendId, LaneStatus>
   zoneStates: Record<string, MarkerState>
-  vmStates: Record<string, { name: string, zone: string, state: string, href: string }>
+  vmStates: Record<string, { name: string, zone: string, state: string, href: string, partition?: string }>
   onZoneClick: (zone: ZoneInfo) => void
   center: google.maps.LatLngLiteral
   zoom: number
@@ -450,6 +450,7 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
             name: vm.name,
             href: vm.href,
             state: vm.state as MarkerState,
+            partition: vm.partition,
           }))
         return (
           <ZoneMarker
