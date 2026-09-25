@@ -146,7 +146,7 @@ const US_FEATURE_STYLE: google.maps.FeatureStyleOptions = {
 
 export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, center, zoom, homePosition, highlightUS, showSpokes, showHalos, mdLayer, showHyperdiskHub, showPartitionChips, showSliceViz }: InfraMapProps) {
   const { config } = useConfig()
-  const { isLoaded } = useJsApiLoader({ googleMapsApiKey: MAPS_API_KEY, libraries: MAPS_LIBRARIES })
+  const { isLoaded, loadError } = useJsApiLoader({ googleMapsApiKey: MAPS_API_KEY, libraries: MAPS_LIBRARIES })
 
   // Two map instances stacked, cross-fade between them.
   const mapARef = useRef<google.maps.Map | null>(null)
@@ -290,7 +290,10 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
     back.setCenter(center)
 
     const preloadMs = 500
-    const stepCount = startZoom - zoom
+    // Step toward the target in either direction. This used to count down only, so a zoom-in
+    // (wide view back to home at 12) ran zero steps and the deck sat at the midpoint zoom.
+    const dir = zoom > startZoom ? 1 : -1
+    const stepCount = Math.abs(zoom - startZoom)
     const msPerStep = 50
 
     // Begin cross-fade after tile preload
@@ -301,7 +304,7 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
 
     // Step zoom 1 level at a time, each step exactly msPerStep apart
     for (let i = 1; i <= stepCount; i++) {
-      const z = startZoom - i
+      const z = startZoom + dir * i
       const timer = setTimeout(() => {
         if (back) {
           back.setZoom(z)
@@ -315,6 +318,20 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
       timersRef.current = []
     }
   }, [center.lat, center.lng, zoom])
+
+  // A blocked Maps script (proxy, bad key, missing referrer) sets loadError and leaves isLoaded
+  // false forever. Say so instead of showing "Loading map..." for the rest of the talk.
+  if (loadError) {
+    return (
+      <div style={{ width: '100vw', height: '100vh', background: '#F7F7F7', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ color: '#EF4035', fontFamily: 'Courier New, monospace', fontSize: 14, maxWidth: 560, textAlign: 'center', lineHeight: 1.5 }}>
+          Map failed to load: {loadError.message}
+          <br />
+          <span style={{ color: '#708090' }}>Check the network or proxy, and that this hostname is on the Maps key's referrer list.</span>
+        </div>
+      </div>
+    )
+  }
 
   if (!isLoaded) {
     return (

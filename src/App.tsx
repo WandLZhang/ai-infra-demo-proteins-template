@@ -41,6 +41,9 @@ export default function App() {
   const [selectedZone, setSelectedZone] = useState<ZoneInfo | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [dispatchLines, setDispatchLines] = useState<string[]>([])
+  // Shown on the home terminal. The dispatch lines only render off home, so a failed submit
+  // written there was invisible and the presenter saw nothing happen.
+  const [submitError, setSubmitError] = useState<string | null>(null)
   const [infoOpen, setInfoOpen] = useState(false)
   const lineQueue = useRef<import('./api').SlurmEvent[]>([])
   const dripRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -73,6 +76,10 @@ export default function App() {
   const showSliceViz = phase === 'img'
 
   const lastEventCount = useRef(0)
+  // Wall-clock ms of this tab's submit. Events stamped before it belong to the previous run,
+  // which the backend hasn't wiped yet on the first poll. 0 means keep everything (attaching
+  // to a run already in flight).
+  const runStartedAt = useRef(0)
   const terminalRef = useRef<HTMLDivElement>(null)
   const terminalDone = useRef(false)
 
@@ -214,9 +221,15 @@ export default function App() {
           pollEvents(),
         ])
 
+        // predict.sh wipes the log at the start of every run, so a shorter list means a new
+        // run began. Without the reset the counter stays pinned at the old length and the
+        // terminal goes silent until the new run outgrows it.
+        if (events.length < lastEventCount.current) lastEventCount.current = 0
         if (events.length > lastEventCount.current) {
+          const cutoff = runStartedAt.current
           const newEvents = events.slice(lastEventCount.current)
             .filter(e => e.type !== 'node_up' && e.type !== 'slurmctld')
+            .filter(e => !cutoff || !e.ts || new Date(e.ts).getTime() >= cutoff)
           if (newEvents.length > 0) {
             lineQueue.current.push(...newEvents)
           }
@@ -247,11 +260,13 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const tpuPoll = setInterval(async () => {
-      const s = await pollTpuStatus()
-      if (s) setTpuStatus(s)
-    }, 10000)
-    pollTpuStatus().then(s => { if (s) setTpuStatus(s) })
+    // A blocked fetch rejects. Catch it so the badge stays on its last value instead of
+    // throwing an unhandled rejection every 10 s into the console the presenter debugs from.
+    const refreshTpu = () => pollTpuStatus()
+      .then(s => { if (s) setTpuStatus(s) })
+      .catch(err => console.warn('TPU status poll failed:', err))
+    const tpuPoll = setInterval(refreshTpu, 10000)
+    refreshTpu()
     return () => {
       clearInterval(tpuPoll)
       if (pollRef.current) clearInterval(pollRef.current)
@@ -267,8 +282,12 @@ export default function App() {
   }, [dispatchLines])
 
   const handleSubmit = useCallback(async () => {
+    setSubmitError(null)
+    const submittedAt = Date.now()
     try {
       const result = await submitRun(currentProtein.id)
+      // 30 s of slack covers browser-to-backend clock skew.
+      runStartedAt.current = result.already_running ? 0 : submittedAt - 30_000
       // already_running = the server saw an in-flight run and didn't write a
       // new trigger. Skip the local-state reset and just attach to the
       // existing run via polling. Without this skip, a second-presser's tab
@@ -283,7 +302,7 @@ export default function App() {
       startPolling()
     } catch (err) {
       console.error('Submit failed:', err)
-      setDispatchLines([`Error: ${err}`])
+      setSubmitError(`sbatch: error: submit failed (${err instanceof Error ? err.message : String(err)})`)
       setPhase('home')
     }
   }, [currentProtein, startPolling])
@@ -451,8 +470,11 @@ export default function App() {
         <div style={{ color: '#d3d3d3' }}>{`researcher@${config.home.loginNode}:~$ `}<span style={{ color: 'var(--accent-term)' }}>sbatch predict.sh \</span></div>
         <div style={{ color: 'var(--accent-term)' }}>  --model=all --target=both --protein={currentProtein.id} \</div>
         <div style={{ color: 'var(--accent-term)' }}>  --requeue --partition=tpu,gpu</div>
+        {phase === 'home' && submitError && (
+          <div className="terminal-line" style={{ marginTop: 6, color: '#EF4035' }}>{submitError}</div>
+        )}
         {phase === 'home' && (
-          <div style={{ marginTop: 6, color: '#708090', fontSize: '1.1vmin' }}>Press Enter to submit</div>
+          <div style={{ marginTop: 6, color: '#708090', fontSize: '1.1vmin' }}>{submitError ? 'Press Enter to retry' : 'Press Enter to submit'}</div>
         )}
         {phase !== 'home' && dispatchLines.length > 0 && (
           <>

@@ -8,30 +8,36 @@ import { theme } from '../config'
 const PDB_URL = 'https://storage.googleapis.com/wz-nih-demo-shared/job/esmfold-tpu.pdb'
 const PDB_METADATA_URL = 'https://storage.googleapis.com/storage/v1/b/wz-nih-demo-shared/o/job%2Fesmfold-tpu.pdb'
 
-// 30 seconds — picks up new AF2-TPU runs without user action, low load on GCS API.
+// 30 seconds — picks up new ESMFold-TPU runs without user action, low load on GCS API.
 const POLL_INTERVAL_MS = 30_000
 
-// Render the GCS object's `updated` ISO-8601 timestamp in EST as
-// "INFERRED 2026-06-01 14:32:18 EST".
-function formatEst(isoTs: string): string {
+// Render the GCS object's `updated` ISO-8601 timestamp in US Eastern as
+// "INFERRED 2026-06-01 14:32:18 EDT". The zone abbreviation comes from Intl, so it reads
+// EDT from March to November and EST the rest of the year. A hardcoded "EST" was an hour
+// off from the time it claimed for most of the year.
+function formatEastern(isoTs: string): string {
   const d = new Date(isoTs)
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
     hour12: false,
+    timeZoneName: 'short',
   }).formatToParts(d)
   const lookup: Record<string, string> = {}
   for (const p of parts) lookup[p.type] = p.value
-  return `INFERRED ${lookup.year}-${lookup.month}-${lookup.day} ${lookup.hour}:${lookup.minute}:${lookup.second} EST`
+  return `INFERRED ${lookup.year}-${lookup.month}-${lookup.day} ${lookup.hour}:${lookup.minute}:${lookup.second} ${lookup.timeZoneName}`
 }
 
 interface ProteinViewerProps {
-  /** When false, the component returns null (used to mount/unmount across phase changes). */
+  /**
+   * When false, the component renders nothing. The instance itself stays mounted, so
+   * everything scoped to one visit has to be reset in the effect cleanup.
+   */
   visible: boolean
 }
 
-type Phase = 'init' | 'waiting' | 'ready'
+type Phase = 'init' | 'waiting' | 'ready' | 'error'
 
 export default function ProteinViewer({ visible }: ProteinViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -45,7 +51,14 @@ export default function ProteinViewer({ visible }: ProteinViewerProps) {
     if (!visible || !containerRef.current) return
     let cancelled = false
     let pollId: ReturnType<typeof setInterval> | null = null
+    let retryId: ReturnType<typeof setTimeout> | null = null
     const controller = new AbortController()
+
+    const fail = (why: string, err?: unknown) => {
+      if (cancelled) return
+      console.warn(`ProteinViewer: ${why}`, err ?? '')
+      setPhase('error')
+    }
 
     async function init() {
       // Dynamic import keeps 3dmol out of any code path that doesn't need it.
@@ -65,28 +78,37 @@ export default function ProteinViewer({ visible }: ProteinViewerProps) {
       pollId = setInterval(refreshIfNew, POLL_INTERVAL_MS)
     }
 
+    // A failed chunk load or WebGL context creation used to reject with nobody listening:
+    // no poll ever started and the panel read CONNECTING… for the rest of the talk.
+    function start() {
+      init().catch(err => {
+        fail('viewer init failed, retrying in 30 s', err)
+        if (!cancelled) retryId = setTimeout(start, POLL_INTERVAL_MS)
+      })
+    }
+
     async function refreshIfNew() {
       try {
         const metaResp = await fetch(PDB_METADATA_URL, { cache: 'no-store', signal: controller.signal })
-        // 404 = af2-tpu.pdb doesn't exist in GCS yet. Could be: fresh setup
+        // 404 = esmfold-tpu.pdb doesn't exist in GCS yet. Could be: fresh setup
         // (no run has ever completed), or a run in flight that wiped the
-        // file before the new AF2-TPU has produced output. Show a clear
+        // file before the new ESMFold-TPU has produced output. Show a clear
         // placeholder instead of a black void.
         if (metaResp.status === 404) {
           if (!cancelled) setPhase('waiting')
           return
         }
-        if (!metaResp.ok) return
+        if (!metaResp.ok) return fail(`metadata fetch returned HTTP ${metaResp.status}`)
         const meta: { updated: string } = await metaResp.json()
         const updated = meta.updated
         if (lastUpdatedRef.current === updated) {
-          // Already rendered this version — keep current view, ensure phase=ready.
-          if (!cancelled && phase !== 'ready') setPhase('ready')
+          // Already rendered this version: keep the current view.
+          if (!cancelled) setPhase('ready')
           return
         }
 
         const pdbResp = await fetch(PDB_URL, { cache: 'no-store', signal: controller.signal })
-        if (!pdbResp.ok) return
+        if (!pdbResp.ok) return fail(`PDB fetch returned HTTP ${pdbResp.status}`)
         const pdbText = await pdbResp.text()
 
         const v = viewerRef.current
@@ -109,19 +131,23 @@ export default function ProteinViewer({ visible }: ProteinViewerProps) {
         v.render()
 
         lastUpdatedRef.current = updated
-        setTimestampLabel(formatEst(updated))
+        setTimestampLabel(formatEastern(updated))
         setPhase('ready')
-      } catch {
-        // Per spec: silent on failure (includes AbortError from cleanup).
+      } catch (err) {
+        // AbortError is the cleanup cancelling an in-flight fetch; anything else is a real
+        // network failure (a corporate proxy block lands here) and gets surfaced.
+        if ((err as Error)?.name === 'AbortError') return
+        fail('structure fetch failed, retrying in 30 s', err)
       }
     }
 
-    init()
+    start()
 
     return () => {
       cancelled = true
       controller.abort()
       if (pollId) clearInterval(pollId)
+      if (retryId) clearTimeout(retryId)
       if (viewerRef.current) {
         try {
           viewerRef.current.spin(false)
@@ -129,10 +155,25 @@ export default function ProteinViewer({ visible }: ProteinViewerProps) {
         } catch { /* viewer torn down */ }
         viewerRef.current = null
       }
+      // The next visit builds a fresh, empty viewer. If this still held the last timestamp,
+      // refreshIfNew would see "already rendered" and never add the model to it, which left a
+      // blank panel on every return to the slide.
+      lastUpdatedRef.current = null
+      setTimestampLabel('')
+      setPhase('init')
     }
   }, [visible])
 
   if (!visible) return null
+
+  const headline =
+    phase === 'init' ? 'CONNECTING…' :
+    phase === 'waiting' ? 'AWAITING ESMFOLD-TPU' :
+    'STRUCTURE UNREACHABLE'
+  const detail =
+    phase === 'init' ? 'fetching last inference from gs://wz-nih-demo-shared/job/esmfold-tpu.pdb' :
+    phase === 'waiting' ? 'no structure in GCS yet — render will appear within 30 s of upload' :
+    'could not fetch gs://wz-nih-demo-shared/job/esmfold-tpu.pdb (network or proxy) — retrying every 30 s'
 
   return (
     <div
@@ -201,18 +242,16 @@ export default function ProteinViewer({ visible }: ProteinViewerProps) {
             <div
               style={{
                 fontSize: 11,
-                color: theme.accent,
+                color: phase === 'error' ? '#EF4035' : theme.accent,
                 opacity: 0.65,
                 letterSpacing: '0.2em',
                 animation: 'softPulse 2.2s ease-in-out infinite',
               }}
             >
-              {phase === 'init' ? 'CONNECTING…' : 'AWAITING AF2-TPU'}
+              {headline}
             </div>
             <div style={{ fontSize: 9, lineHeight: 1.5, maxWidth: 220 }}>
-              {phase === 'init'
-                ? 'fetching last inference from gs://wz-nih-demo-shared/job/esmfold-tpu.pdb'
-                : 'no structure in GCS yet — render will appear within 30 s of upload'}
+              {detail}
             </div>
           </div>
         )}
