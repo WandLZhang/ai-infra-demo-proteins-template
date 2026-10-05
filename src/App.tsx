@@ -509,9 +509,10 @@ export default function App() {
           {phase === 'home' ? config.home.buildingName : currentProtein.name}
         </div>
         <div className="location-paper-coords" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span>{phase === 'home'
-            ? `Lat: ${config.home.markerLatLng.lat}, Lng: ${config.home.markerLatLng.lng}`
-            : `UniProt ${currentProtein.uniprotId} · ${currentProtein.residueCount} amino acids`}</span>
+          {phase === 'home'
+            ? <span>{`Lat: ${config.home.markerLatLng.lat}, Lng: ${config.home.markerLatLng.lng}`}</span>
+            // During the run: what the protein does, in plain words, under its name.
+            : <span className="location-paper-desc">{currentProtein.description.replace(' — ', ' · ')}</span>}
           <SetupWizard visible={phase === 'home'} onOpenChange={setWizardOpen} />
         </div>
       </div>

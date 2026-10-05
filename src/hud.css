@@ -578,6 +578,14 @@ html, body { font-family: var(--font-text); }
   letter-spacing: 0.03em;
   margin-top: 8px;
 }
+/* The protein's plain-words description sits where the lat/long line was, in Google Sans. */
+.location-paper-desc {
+  font-family: var(--font-display);
+  font-size: 1.3vw;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #5f6368;
+}
 /* Info box links and code */
 .info-body a {
   color: #1a73e8;
