@@ -21,6 +21,8 @@ interface ZoneMarkerProps {
   onClick?: () => void
   showHalo?: boolean
   showPartitionChips?: boolean
+  /** Moves the marker down this many pixels, so its label clears a neighboring marker. */
+  offsetY?: number
 }
 
 // The chip comes from the Slurm partition the job landed in, carried on the lane's allocate event.
@@ -33,19 +35,19 @@ function partitionOf(vm: VMInfo): 'SPOT' | 'STANDARD' {
 }
 
 const VM_STATE_COLORS: Record<MarkerState, string> = {
-  idle: '#999',
-  provisioning: '#F8981D',
-  failed: '#f47065',
+  idle: '#9aa0a6',
+  provisioning: '#FDD663',
+  failed: '#F28B82',
   active: 'var(--accent-soft)',
   done: 'var(--accent-soft)',
 }
 
-export default function ZoneMarker({ position, label, subtitle, subtitleHref, state, vms, onClick, showHalo, showPartitionChips }: ZoneMarkerProps) {
+export default function ZoneMarker({ position, label, subtitle, subtitleHref, state, vms, onClick, showHalo, showPartitionChips, offsetY }: ZoneMarkerProps) {
   const stateClass = state === 'done' ? 'marker-done' : state === 'active' ? 'marker-active' : state === 'provisioning' ? 'marker-provisioning' : state === 'failed' ? 'marker-failed' : ''
 
   return (
     <OverlayView position={position} mapPaneName={OverlayView.OVERLAY_MOUSE_TARGET}>
-      <div className={`zone-marker-wrap ${stateClass}`} onClick={onClick}>
+      <div className={`zone-marker-wrap ${stateClass}`} onClick={onClick} style={offsetY ? { transform: `translate(-50%, calc(-50% + ${offsetY}px))` } : undefined}>
         <div className="marker-spinner-box">
           {showHalo && <div className="marker-halo" />}
           <div className="rotatingBoxes1" />
@@ -56,8 +58,8 @@ export default function ZoneMarker({ position, label, subtitle, subtitleHref, st
           <b>{label}</b>
           {subtitle && !vms?.length && (
             subtitleHref
-              ? <a href={subtitleHref} target="_blank" rel="noopener" style={{ display: 'block', fontSize: '0.75em', color: '#708090', textDecoration: 'none', marginTop: 1 }}>{subtitle}</a>
-              : <span style={{ display: 'block', fontSize: '0.75em', color: '#708090', marginTop: 1 }}>{subtitle}</span>
+              ? <a href={subtitleHref} target="_blank" rel="noopener" style={{ display: 'block', fontSize: '0.75em', color: '#9aa0a6', textDecoration: 'none', marginTop: 1 }}>{subtitle}</a>
+              : <span style={{ display: 'block', fontSize: '0.75em', color: '#9aa0a6', marginTop: 1 }}>{subtitle}</span>
           )}
           {vms && vms.length > 0 && vms.map(vm => {
             const part = partitionOf(vm)

@@ -43,15 +43,15 @@ export default function SideLadder({ lanes, onSelect, highlightBackends }: SideL
         const pairCheapest = bothDone ? Math.min(cost, counterpart.costAccumulated) : null
         const ratio = pairCheapest ? cost / pairCheapest : null
 
-        let borderColor = 'rgba(255, 255, 255, 0.2)'
+        let borderColor = '#80868b'
         if (lane.state !== 'idle' && lane.state !== 'done' && lane.state !== 'failed') {
-          borderColor = 'rgba(244, 180, 0, 0.7)'
+          borderColor = 'rgba(251, 188, 4, 0.8)'
         }
         if (lane.state === 'done') {
-          borderColor = 'rgba(212, 96, 86, 0.7)'
+          borderColor = 'rgba(52, 168, 83, 0.8)'
         }
         if (lane.state === 'failed') {
-          borderColor = 'rgba(219, 68, 55, 0.7)'
+          borderColor = 'rgba(234, 67, 53, 0.8)'
         }
 
         let subtitle = stateLabel(lane.state)

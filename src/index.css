@@ -3,7 +3,7 @@
 /* Hide React Flow node handles (the tiny circles) */
 .react-flow__handle { display: none !important; }
 /* Smaller, consistent node styling */
-.react-flow__node { font-family: freight-sans-pro, sans-serif !important; }
+.react-flow__node { font-family: var(--font-text) !important; }
 .react-flow__edge-path { stroke-width: 1.5 !important; }
 .react-flow__background { opacity: 0.3; }
 

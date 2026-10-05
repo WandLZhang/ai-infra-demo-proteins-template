@@ -90,14 +90,14 @@ export default function SetupWizard({ visible, onOpenChange }: Props) {
   if (!visible) return null
 
   const inputStyle: React.CSSProperties = {
-    width: '100%', padding: '6px 8px', border: '1px solid #ccc', borderRadius: 3,
-    fontSize: 12, fontFamily: 'freight-sans-pro, sans-serif', background: '#fff', color: '#333',
+    width: '100%', padding: '6px 8px', border: '1px solid #dadce0', borderRadius: 3,
+    fontSize: 12, fontFamily: 'var(--font-display)', background: '#fff', color: '#3c4043',
     boxSizing: 'border-box',
   }
   const labelStyle: React.CSSProperties = {
-    display: 'block', fontSize: 10, fontWeight: 600, color: '#708090',
+    display: 'block', fontSize: 10, fontWeight: 600, color: '#5f6368',
     letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 3, marginTop: 10,
-    fontFamily: 'freight-sans-pro, sans-serif',
+    fontFamily: 'var(--font-display)',
   }
 
   return (
@@ -108,11 +108,11 @@ export default function SetupWizard({ visible, onOpenChange }: Props) {
         style={{
           background: 'rgba(0,0,0,0.05)', border: '1px solid rgba(0,0,0,0.1)', borderRadius: 3,
           cursor: 'pointer', padding: '1px 6px',
-          fontSize: 12, lineHeight: '1.4', color: '#708090', transition: 'all 0.15s',
+          fontSize: 12, lineHeight: '1.4', color: '#5f6368', transition: 'all 0.15s',
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
         }}
-        onMouseEnter={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.1)'; e.currentTarget.style.color = '#333' }}
-        onMouseLeave={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.05)'; e.currentTarget.style.color = '#708090' }}
+        onMouseEnter={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.1)'; e.currentTarget.style.color = '#3c4043' }}
+        onMouseLeave={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.05)'; e.currentTarget.style.color = '#5f6368' }}
       >
         ⚙
       </button>
@@ -120,12 +120,12 @@ export default function SetupWizard({ visible, onOpenChange }: Props) {
       {showTooltip && !open && (
         <div style={{
           position: 'absolute', bottom: 'calc(100% + 8px)', left: '50%', transform: 'translateX(-50%)',
-          background: '#333', color: '#fff', padding: '8px 12px', borderRadius: 6,
-          fontSize: 11, fontFamily: 'freight-sans-pro, sans-serif', whiteSpace: 'nowrap',
+          background: '#3c4043', color: '#fff', padding: '8px 12px', borderRadius: 6,
+          fontSize: 11, fontFamily: 'var(--font-display)', whiteSpace: 'nowrap',
           boxShadow: '0 4px 16px rgba(0,0,0,0.2)', animation: 'fadeInUp 0.3s ease',
         }}>
           <div style={{ position: 'absolute', bottom: -5, left: '50%', transform: 'translateX(-50%) rotate(45deg)',
-            width: 10, height: 10, background: '#333' }} />
+            width: 10, height: 10, background: '#3c4043' }} />
           <span>Click to change the origin location</span>
           <button onClick={e => { e.stopPropagation(); dismissTooltip() }} style={{
             background: 'none', border: 'none', color: 'rgba(255,255,255,0.5)', cursor: 'pointer',
@@ -149,10 +149,10 @@ export default function SetupWizard({ visible, onOpenChange }: Props) {
             border: '1px solid rgba(0,0,0,0.08)',
           }}
         >
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#333', fontFamily: 'freight-sans-pro, sans-serif', marginBottom: 4 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#3c4043', fontFamily: 'var(--font-display)', marginBottom: 4 }}>
             Configure Institution
           </div>
-          <div style={{ fontSize: 10, color: '#999', marginBottom: 8, fontFamily: 'freight-sans-pro, sans-serif' }}>
+          <div style={{ fontSize: 10, color: '#80868b', marginBottom: 8, fontFamily: 'var(--font-display)' }}>
             Changes apply live to the demo.
           </div>
 
@@ -215,16 +215,16 @@ export default function SetupWizard({ visible, onOpenChange }: Props) {
           <div style={{ marginTop: 14, display: 'flex', gap: 8 }}>
             <button onClick={() => setOpen(false)} style={{
               flex: 1, padding: '7px 12px', fontSize: 11, fontWeight: 600,
-              background: '#333', color: '#fff', border: 'none', borderRadius: 3,
-              cursor: 'pointer', fontFamily: 'freight-sans-pro, sans-serif',
+              background: '#3c4043', color: '#fff', border: 'none', borderRadius: 3,
+              cursor: 'pointer', fontFamily: 'var(--font-display)',
               letterSpacing: '0.04em',
             }}>
               Done
             </button>
             <button onClick={() => { resetConfig(); setOpen(false) }} style={{
               padding: '7px 12px', fontSize: 11,
-              background: 'transparent', color: '#999', border: '1px solid #ddd', borderRadius: 3,
-              cursor: 'pointer', fontFamily: 'freight-sans-pro, sans-serif',
+              background: 'transparent', color: '#80868b', border: '1px solid #dadce0', borderRadius: 3,
+              cursor: 'pointer', fontFamily: 'var(--font-display)',
             }}>
               Reset
             </button>

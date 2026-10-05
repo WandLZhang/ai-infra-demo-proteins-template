@@ -135,3 +135,6 @@ tests/screenshots/
 
 # Firebase CLI deploy cache (local-only content hashes)
 .firebase/
+
+# Presenter's spoken run-throughs and drafts (local only)
+private/

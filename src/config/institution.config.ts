@@ -10,11 +10,13 @@ export const config = {
     menuSubtitle: 'Google Public Sector Summit · TPU vs GPU',
   },
   home: {
-    buildingName: 'RONALD REAGAN BUILDING',
+    buildingName: 'Ronald Reagan Building',
     markerLatLng: { lat: 38.8942, lng: -77.0307 },
     cameraLatLng: { lat: 38.8550, lng: -76.9407 },
     loginNode: 'login',
     markerSubtitle: 'login · Slurm',
+    // At the zoomed-out views DC sits on top of us-east4, so the home label drops below it.
+    zoomedOutLabelOffsetY: 30,
     controllerConsoleHref: 'https://console.cloud.google.com/compute/instancesDetail/zones/us-east5-a/instances/biowulf-controller?project=wz-nih-demo-controller',
     displayBucket: 'gs://gps-summit-research',
   },

@@ -60,9 +60,9 @@ const US_MULTIREGION_PATH: google.maps.LatLngLiteral[] = [
 const US_MULTIREGION_POLYGON_OPTIONS: google.maps.PolygonOptions = {
   paths: US_MULTIREGION_PATH,
   fillColor: theme.accent,
-  fillOpacity: 0.05,
+  fillOpacity: 0.06,
   strokeColor: theme.accent,
-  strokeOpacity: 0.25,
+  strokeOpacity: 0.6,
   strokeWeight: 1.2,
   clickable: false,
   zIndex: 1,
@@ -132,15 +132,15 @@ const mapOptions: google.maps.MapOptions = {
   mapTypeControl: false,
   streetViewControl: false,
   fullscreenControl: false,
-  backgroundColor: '#F7F7F7',
+  backgroundColor: '#f8f9fa',
 }
 
 // Style applied to the USA country feature when highlightUS is true.
 const US_FEATURE_STYLE: google.maps.FeatureStyleOptions = {
   fillColor: theme.accent,
-  fillOpacity: 0.05,
+  fillOpacity: 0.06,
   strokeColor: theme.accent,
-  strokeOpacity: 0.25,
+  strokeOpacity: 0.6,
   strokeWeight: 1.2,
 }
 
@@ -227,7 +227,7 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
     let t = 0
     const interval = setInterval(() => {
       t += 0.08
-      const opacity = 0.5 + 0.4 * Math.sin(t)
+      const opacity = 0.6 + 0.3 * Math.sin(t)
       polylines.forEach(p => p.setOptions({ icons: dashes(opacity) }))
     }, 50)
 
@@ -243,9 +243,9 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
     const US_GEOJSON_URL = 'https://cdn.jsdelivr.net/gh/glynnbird/countriesgeojson@master/united%20states%20of%20america.geojson'
     const DATA_STYLE: google.maps.Data.StyleOptions = {
       fillColor: theme.accent,
-      fillOpacity: 0.05,
+      fillOpacity: 0.06,
       strokeColor: theme.accent,
-      strokeOpacity: 0.25,
+      strokeOpacity: 0.6,
       strokeWeight: 1.2,
       clickable: false,
       zIndex: 1,
@@ -322,11 +322,11 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
   // false forever. Say so instead of showing "Loading map..." for the rest of the talk.
   if (loadError) {
     return (
-      <div style={{ width: '100vw', height: '100vh', background: '#F7F7F7', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ color: '#EF4035', fontFamily: 'Courier New, monospace', fontSize: 14, maxWidth: 560, textAlign: 'center', lineHeight: 1.5 }}>
+      <div style={{ width: '100vw', height: '100vh', background: '#f8f9fa', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ color: '#EA4335', fontFamily: 'var(--font-mono)', fontSize: 14, maxWidth: 560, textAlign: 'center', lineHeight: 1.5 }}>
           Map failed to load: {loadError.message}
           <br />
-          <span style={{ color: '#708090' }}>Check the network or proxy, and that this hostname is on the Maps key's referrer list.</span>
+          <span style={{ color: '#5f6368' }}>Check the network or proxy, and that this hostname is on the Maps key's referrer list.</span>
         </div>
       </div>
     )
@@ -334,8 +334,8 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
 
   if (!isLoaded) {
     return (
-      <div style={{ width: '100vw', height: '100vh', background: '#F7F7F7', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ color: '#708090', fontFamily: 'Courier New, monospace', fontSize: 14 }}>Loading map...</div>
+      <div style={{ width: '100vw', height: '100vh', background: '#f8f9fa', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ color: '#5f6368', fontFamily: 'var(--font-mono)', fontSize: 14 }}>Loading map...</div>
       </div>
     )
   }
@@ -394,6 +394,7 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
         subtitle={config.home.markerSubtitle}
         subtitleHref={config.home.controllerConsoleHref}
         state="done"
+        offsetY={zoom < 10 ? ((config.home as { zoomedOutLabelOffsetY?: number }).zoomedOutLabelOffsetY ?? 0) : 0}
         onClick={() => {}}
       />
       {hyperdiskReady && (
