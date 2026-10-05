@@ -405,17 +405,17 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
             <div className="pd-stack-row">
               <div className="pd-stack-name">Pod Snapshots</div>
               <div className="pd-stack-hero">seconds</div>
-              <div className="pd-stack-meta">80% faster warm restart</div>
+              <div className="pd-stack-meta">89% faster startup</div>
             </div>
             <div className="pd-stack-row">
               <div className="pd-stack-name">BoltVMs</div>
               <div className="pd-stack-hero">2 min</div>
-              <div className="pd-stack-meta">H100 vs 15 min cold start</div>
+              <div className="pd-stack-meta">GPU vs 15 min cold start</div>
             </div>
             <div className="pd-stack-row">
               <div className="pd-stack-name">Hyperdisk ML</div>
               <div className="pd-stack-hero">1.2 TiB/s</div>
-              <div className="pd-stack-meta">2,500 readers &middot; 11.9&times; vs GCS</div>
+              <div className="pd-stack-meta">2,500 readers &middot; 11.9&times; vs model registry</div>
             </div>
           </div>
         </OverlayView>

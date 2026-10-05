@@ -363,7 +363,8 @@
   align-items: baseline;
   justify-content: space-between;
   gap: 18px;
-  width: 440px;
+  /* Wide enough for the longest meta line ("2,500 readers · 11.9× vs model registry"), since rows don't wrap. */
+  width: 540px;
   box-sizing: border-box;
   background: rgba(255,255,255,0.99);
   border: 1px solid rgba(var(--accent-rgb), 0.35);
