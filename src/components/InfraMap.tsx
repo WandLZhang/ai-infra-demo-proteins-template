@@ -202,6 +202,13 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
     const g = (window as any).google?.maps
     if (!g) return
 
+    const dashes = (opacity: number) => [
+      {
+        icon: { path: 'M 0,-1 0,1', strokeOpacity: opacity, strokeColor: theme.accent, scale: 2 },
+        offset: '0',
+        repeat: '12px',
+      },
+    ]
     const polylines = ZONE_LOCATIONS.map(zone =>
       new g.Polyline({
         path: [US_BUCKET_LABEL_POSITION, { lat: zone.lat, lng: zone.lng }],
@@ -209,27 +216,19 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
         strokeOpacity: 0,
         clickable: false,
         zIndex: 2,
-        icons: [
-          {
-            icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.3, strokeColor: theme.accent, scale: 2 },
-            offset: '0',
-            repeat: '12px',
-          },
-        ],
+        icons: dashes(0.3),
         map,
       })
     )
 
-    // Pulse the dash opacity with a sine wave so all spokes breathe in unison.
+    // Pulse the dash opacity with a sine wave so all spokes breathe in unison. Each tick sets a fresh
+    // icon list: p.get('icons') returned undefined here, so reading it back threw 20 times a second
+    // while a spokes slide was up, and the dashes never pulsed.
     let t = 0
     const interval = setInterval(() => {
       t += 0.08
       const opacity = 0.5 + 0.4 * Math.sin(t)
-      polylines.forEach(p => {
-        const icons = p.get('icons')
-        icons[0].icon.strokeOpacity = opacity
-        p.set('icons', icons)
-      })
+      polylines.forEach(p => p.setOptions({ icons: dashes(opacity) }))
     }, 50)
 
     return () => {

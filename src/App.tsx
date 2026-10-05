@@ -8,7 +8,7 @@ import InfoButton from './components/InfoButton'
 import ProteinViewer from './components/ProteinViewer'
 import type { Protein, ModelId, BackendId, LaneStatus, PredictResponse } from './types'
 import { BACKENDS } from './backends'
-import { submitRun, pollStatus, pollEvents, listEventNames, pollTpuStatus, type TpuStatus } from './api'
+import { submitRun, pollStatus, pollEvents, listEventNames, pollTpuStatus, wakeStateServer, type TpuStatus } from './api'
 import { theme, accentAlpha, useConfig } from './config'
 import SetupWizard from './components/SetupWizard'
 
@@ -28,6 +28,18 @@ function initLaneStatus(backendId: BackendId): LaneStatus {
   const b = BACKENDS.find(b => b.id === backendId)!
   return { backendId, state: 'idle', startedAt: null, completedAt: null, elapsedMs: 0, costAccumulated: 0, result: null, error: null, talkTrackSlide: b.talkTrackSlide, talkTrackLabel: b.talkTrackLabel }
 }
+
+// Slurm node names that aren't the name of the TPU behind them. slurmd on the TPU nih-v6e-e5b
+// (us-east5-b) registers as nihprotein-tpuv6eeast5a-0, and run_backend.sh reports SLURMD_NODENAME,
+// so the console link needs the TPU's own name.
+const TPU_FOR_SLURM_NODE: Record<string, string> = { 'nihprotein-tpuv6eeast5a-0': 'nih-v6e-e5b' }
+
+// Enter / ArrowRight advance along SLIDE_ORDER and ArrowLeft walks it back, so the two directions
+// can't drift apart. 'pse' is the last manual slide; 'done' is set by polling when inference completes.
+const SLIDE_ORDER: Phase[] = [
+  'running', 'catalog', 'pd1', 'pd2', 'img', 'catalog2', 'catalog3', 'catalog4',
+  'md1', 'md2', 'md3', 'tpu1', 'tpu2', 'tpu3', 'models1', 'models2', 'models3', 'pse',
+]
 
 export default function App() {
   const { config } = useConfig()
@@ -91,8 +103,8 @@ export default function App() {
 
   function consoleUrl(ev: { vm?: string | null, zone?: string, partition?: string, project?: string }): string {
     if (!ev.vm || !ev.zone || !ev.project) return ''
-    if (ev.partition === 'tpu')
-      return `https://console.cloud.google.com/compute/tpus/details/${ev.zone}/${ev.vm}?project=${ev.project}`
+    if (ev.partition === 'tpu' || ev.partition === 'spot-tpu')
+      return `https://console.cloud.google.com/compute/tpus/details/${ev.zone}/${TPU_FOR_SLURM_NODE[ev.vm] ?? ev.vm}?project=${ev.project}`
     return `https://console.cloud.google.com/compute/instancesDetail/zones/${ev.zone}/instances/${ev.vm}?project=${ev.project}`
   }
 
@@ -228,7 +240,7 @@ export default function App() {
       try {
         const [status, events] = await Promise.all([
           pollStatus(),
-          pollEvents(),
+          pollEvents(seenEvents.current),
         ])
         // A newer run started while this poll was in flight: its refs aren't ours to touch.
         if (gen !== pollGen.current) return
@@ -290,6 +302,15 @@ export default function App() {
     }
   }, [])
 
+  // While the home slide waits for Enter, keep the state server warm: a call on load, then one every
+  // 5 minutes, inside Cloud Run's 15-minute idle window. Failures only warn; the submit still works.
+  useEffect(() => {
+    if (phase !== 'home') return
+    const wake = () => wakeStateServer().catch(err => console.warn('State server wake failed:', err))
+    wake()
+    const wakeTimer = setInterval(wake, 5 * 60 * 1000)
+    return () => clearInterval(wakeTimer)
+  }, [phase])
 
   useEffect(() => {
     if (terminalRef.current) {
@@ -326,8 +347,7 @@ export default function App() {
     }
   }, [currentProtein, startPolling])
 
-  // Enter + Arrow keys advance the narrative: home → run → catalog → done
-  // ArrowLeft navigates back through the same sequence
+  // Enter + Arrow keys walk SLIDE_ORDER: home → run → catalog → … → pse
   React.useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (wizardOpen) return
@@ -339,47 +359,17 @@ export default function App() {
           if (hasActiveRun) setPhase('running')
           else handleSubmit()
         }
-        else if (phase === 'dispatching' || phase === 'running') setPhase('catalog')
-        else if (phase === 'catalog') setPhase('pd1')
-        else if (phase === 'pd1') setPhase('pd2')
-        else if (phase === 'pd2') setPhase('img')
-        else if (phase === 'img') setPhase('catalog2')
-        else if (phase === 'catalog2') setPhase('catalog3')
-        else if (phase === 'catalog3') setPhase('catalog4')
-        else if (phase === 'catalog4') setPhase('md1')
-        else if (phase === 'md1') setPhase('md2')
-        else if (phase === 'md2') setPhase('md3')
-        else if (phase === 'md3') setPhase('tpu1')
-        else if (phase === 'tpu1') setPhase('tpu2')
-        else if (phase === 'tpu2') setPhase('tpu3')
-        else if (phase === 'tpu3') setPhase('models1')
-        else if (phase === 'models1') setPhase('models2')
-        else if (phase === 'models2') setPhase('models3')
-        else if (phase === 'models3') setPhase('pse')
-        // 'pse' is the final manual slide — 'done' is set by polling when inference completes
-        // 'done' stays
+        else {
+          // Advance along SLIDE_ORDER; 'dispatching' sits at the same spot as 'running'.
+          const i = SLIDE_ORDER.indexOf(phase === 'dispatching' ? 'running' : phase)
+          if (i >= 0 && i < SLIDE_ORDER.length - 1) setPhase(SLIDE_ORDER[i + 1])
+        }
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault()
-        if (phase === 'done') setPhase('pse')
-        else if (phase === 'pse') setPhase('models3')
-        else if (phase === 'models3') setPhase('models2')
-        else if (phase === 'models2') setPhase('models1')
-        else if (phase === 'models1') setPhase('tpu3')
-        else if (phase === 'tpu3') setPhase('tpu2')
-        else if (phase === 'tpu2') setPhase('tpu1')
-        else if (phase === 'tpu1') setPhase('md3')
-        else if (phase === 'md3') setPhase('md2')
-        else if (phase === 'md2') setPhase('md1')
-        else if (phase === 'md1') setPhase('catalog4')
-        else if (phase === 'catalog4') setPhase('catalog3')
-        else if (phase === 'catalog3') setPhase('catalog2')
-        else if (phase === 'catalog2') setPhase('img')
-        else if (phase === 'img') setPhase('pd2')
-        else if (phase === 'pd2') setPhase('pd1')
-        else if (phase === 'pd1') setPhase('catalog')
-        else if (phase === 'catalog') setPhase('running')
-        else if (phase === 'running' || phase === 'dispatching') setPhase('home')
-        // 'home' stays
+        const i = SLIDE_ORDER.indexOf(phase === 'dispatching' ? 'running' : phase)
+        if (phase === 'done') setPhase(SLIDE_ORDER[SLIDE_ORDER.length - 1])
+        else if (i === 0) setPhase('home')
+        else if (i > 0) setPhase(SLIDE_ORDER[i - 1])
       }
     }
     window.addEventListener('keydown', handler)

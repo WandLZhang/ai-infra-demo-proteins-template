@@ -14,7 +14,8 @@ function stateLabel(state: string): string {
   switch (state) {
     case 'idle': return 'ready'
     case 'queued': return 'queued'
-    case 'allocating': return 'allocating spot'
+    // A lane reaches this state on whichever partition took the job, Spot or standard.
+    case 'allocating': return 'allocating'
     case 'pulling': return 'pulling container'
     case 'loading': return 'loading model'
     case 'inferring': return 'inferring...'

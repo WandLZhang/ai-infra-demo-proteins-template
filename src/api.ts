@@ -14,6 +14,14 @@ export async function submitRun(proteinId: string): Promise<{ already_running: b
   return resp.json()
 }
 
+// Cloud Run scales the state server to zero after about 15 idle minutes, and booting an instance
+// added 2.9 s to the first submit on 2026-10-02. The page calls this on load and every few minutes
+// while it waits for Enter, so the submit reaches a warm instance.
+export async function wakeStateServer(): Promise<void> {
+  const resp = await fetch(`${STATE_SERVER}/api/health`, { cache: 'no-store', signal: AbortSignal.timeout(15000) })
+  if (!resp.ok) throw new Error(`State server health: HTTP ${resp.status}`)
+}
+
 export interface LaneStatusBlob {
   backend_id: string
   state: string
@@ -104,8 +112,10 @@ export async function listEventNames(): Promise<string[]> {
   return allItems.map(i => i.name).filter(n => !n.includes('slurmctld')).sort((a, b) => a.localeCompare(b))
 }
 
-export async function pollEvents(): Promise<SlurmEvent[]> {
-  const names = await listEventNames()
+// Downloads only the event objects whose names aren't in `seen`. Re-downloading every object on
+// every poll made a poll outlast the 2 s interval once the log held a run's worth of events.
+export async function pollEvents(seen: ReadonlySet<string> = new Set()): Promise<SlurmEvent[]> {
+  const names = (await listEventNames()).filter(n => !seen.has(n))
   const events: SlurmEvent[] = await Promise.all(
     names.map(async (name) => {
       const data = await fetchGcsJson(name)

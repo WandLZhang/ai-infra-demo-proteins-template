@@ -11,6 +11,12 @@ const PDB_METADATA_URL = 'https://storage.googleapis.com/storage/v1/b/wz-nih-dem
 // 30 seconds — picks up new ESMFold-TPU runs without user action, low load on GCS API.
 const POLL_INTERVAL_MS = 30_000
 
+// The 3dmol chunk loads at startup, not on the first models slide. Every build renames the chunk
+// and Firebase answers the old name with index.html, so a tab opened before a deploy couldn't load
+// it later and the panel read STRUCTURE UNREACHABLE.
+const threeDmol = import('3dmol')
+threeDmol.catch(err => console.warn('ProteinViewer: 3dmol chunk failed to load at startup', err))
+
 // Render the GCS object's `updated` ISO-8601 timestamp in US Eastern as
 // "INFERRED 2026-06-01 14:32:18 EDT". The zone abbreviation comes from Intl, so it reads
 // EDT from March to November and EST the rest of the year. A hardcoded "EST" was an hour
@@ -64,8 +70,7 @@ export default function ProteinViewer({ visible }: ProteinViewerProps) {
     }
 
     async function init() {
-      // Dynamic import keeps 3dmol out of any code path that doesn't need it.
-      const $3Dmol = await import('3dmol')
+      const $3Dmol = await threeDmol
       if (cancelled || !containerRef.current) return
 
       viewerRef.current = $3Dmol.createViewer(containerRef.current, {
