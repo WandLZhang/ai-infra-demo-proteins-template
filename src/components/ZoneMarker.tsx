@@ -7,6 +7,8 @@ export interface VMInfo {
   name: string
   href: string
   state: MarkerState
+  /** Slurm partition the job landed in, from the lane's allocate event: spot-tpu, spot-gpu, tpu, gpu. */
+  partition?: string
 }
 
 interface ZoneMarkerProps {
@@ -21,10 +23,13 @@ interface ZoneMarkerProps {
   showPartitionChips?: boolean
 }
 
-// VM names contain "spot" for Spot-partition nodes; otherwise they ran on
-// the guaranteed (DWS Flex) partition. This derives the chip label.
-function partitionOf(vmName: string): 'SPOT' | 'FLEX' {
-  return vmName.toLowerCase().includes('spot') ? 'SPOT' : 'FLEX'
+// The chip comes from the Slurm partition the job landed in, carried on the lane's allocate event.
+// VM names don't track provisioning: nihprotein-a100spotcentra-0 runs STANDARD in the gpu partition,
+// and the Spot TPU nodes have no "spot" in their names. The name is only a fallback for markers
+// built before an allocate event arrives.
+function partitionOf(vm: VMInfo): 'SPOT' | 'STANDARD' {
+  if (vm.partition) return vm.partition.startsWith('spot') ? 'SPOT' : 'STANDARD'
+  return vm.name.toLowerCase().includes('spot') ? 'SPOT' : 'STANDARD'
 }
 
 const VM_STATE_COLORS: Record<MarkerState, string> = {
@@ -55,7 +60,7 @@ export default function ZoneMarker({ position, label, subtitle, subtitleHref, st
               : <span style={{ display: 'block', fontSize: '0.75em', color: '#708090', marginTop: 1 }}>{subtitle}</span>
           )}
           {vms && vms.length > 0 && vms.map(vm => {
-            const part = partitionOf(vm.name)
+            const part = partitionOf(vm)
             const chip = showPartitionChips ? (
               <span className={`partition-chip partition-chip-${part.toLowerCase()}`}>{part}</span>
             ) : null

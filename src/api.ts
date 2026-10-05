@@ -14,6 +14,14 @@ export async function submitRun(proteinId: string): Promise<{ already_running: b
   return resp.json()
 }
 
+// Cloud Run scales the state server to zero after about 15 idle minutes, and booting an instance
+// added 2.9 s to the first submit on 2026-10-02. The page calls this on load and every few minutes
+// while it waits for Enter, so the submit reaches a warm instance.
+export async function wakeStateServer(): Promise<void> {
+  const resp = await fetch(`${STATE_SERVER}/api/health`, { cache: 'no-store', signal: AbortSignal.timeout(15000) })
+  if (!resp.ok) throw new Error(`State server health: HTTP ${resp.status}`)
+}
+
 export interface LaneStatusBlob {
   backend_id: string
   state: string
@@ -49,6 +57,8 @@ export interface SlurmEvent {
   protein_id?: string
   seq_len?: number
   error?: string
+  /** GCS object name, set by pollEvents. Unique per event, so it keys de-duplication. */
+  _name?: string
 }
 
 const ALL_BACKENDS: BackendId[] = [
@@ -56,7 +66,8 @@ const ALL_BACKENDS: BackendId[] = [
 ]
 
 async function fetchGcsJson(path: string): Promise<any | null> {
-  const resp = await fetch(`${GCS_BASE}/${path}?t=${Date.now()}`, { cache: 'no-store' })
+  // A timeout so one hung request can't stall the one-at-a-time poll loop.
+  const resp = await fetch(`${GCS_BASE}/${path}?t=${Date.now()}`, { cache: 'no-store', signal: AbortSignal.timeout(8000) })
   if (!resp.ok) return null
   return resp.json()
 }
@@ -89,21 +100,26 @@ export async function pollStatus(): Promise<JobStatus> {
   return { lanes, all_complete }
 }
 
-export async function pollEvents(): Promise<SlurmEvent[]> {
+// Names of the event objects currently in the run log, sorted, slurmctld events excluded.
+export async function listEventNames(): Promise<string[]> {
   const listResp = await fetch(
     `https://storage.googleapis.com/storage/v1/b/${GCS_BUCKET}/o?prefix=job/log/&delimiter=/&t=${Date.now()}`,
-    { cache: 'no-store' }
+    { cache: 'no-store', signal: AbortSignal.timeout(8000) }
   )
   if (!listResp.ok) return []
   const listData = await listResp.json()
   const allItems: { name: string }[] = listData.items || []
-  const items = allItems.filter(i => !i.name.includes('slurmctld'))
-  items.sort((a, b) => a.name.localeCompare(b.name))
+  return allItems.map(i => i.name).filter(n => !n.includes('slurmctld')).sort((a, b) => a.localeCompare(b))
+}
 
+// Downloads only the event objects whose names aren't in `seen`. Re-downloading every object on
+// every poll made a poll outlast the 2 s interval once the log held a run's worth of events.
+export async function pollEvents(seen: ReadonlySet<string> = new Set()): Promise<SlurmEvent[]> {
+  const names = (await listEventNames()).filter(n => !seen.has(n))
   const events: SlurmEvent[] = await Promise.all(
-    items.map(async (item) => {
-      const data = await fetchGcsJson(item.name)
-      return data as SlurmEvent | null
+    names.map(async (name) => {
+      const data = await fetchGcsJson(name)
+      return data ? ({ ...data, _name: name } as SlurmEvent) : null
     })
   ).then(results => results.filter(Boolean) as SlurmEvent[])
 

@@ -411,7 +411,7 @@
   line-height: 1.25;
 }
 .partition-chip-spot { color: #F8981D; }
-.partition-chip-flex { color: var(--accent); }
+.partition-chip-standard { color: var(--accent); }
 
 /* Zone cache halo — cyan ring around each marker on the catalog3 slide.
    Visualizes Rapid Cache (SSD data) + Image Streaming (container files) landing zone-local. */

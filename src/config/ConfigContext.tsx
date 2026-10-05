@@ -3,12 +3,24 @@ import { config as defaultConfig } from './institution.config'
 
 type InstitutionConfig = typeof defaultConfig
 
-const STORAGE_KEY = 'hpc-demo-config'
+// Versioned so a config saved against an older schema is ignored instead of loaded.
+const STORAGE_KEY = 'hpc-demo-config-v2'
 
 function loadConfig(): InstitutionConfig {
   try {
     const stored = localStorage.getItem(STORAGE_KEY)
-    if (stored) return JSON.parse(stored)
+    if (stored) {
+      const s = JSON.parse(stored) as Partial<InstitutionConfig>
+      // Merge section by section over the shipped defaults. A saved config missing a field
+      // would otherwise crash the first render that reads it.
+      return {
+        ...defaultConfig,
+        ...s,
+        institution: { ...defaultConfig.institution, ...s.institution },
+        home: { ...defaultConfig.home, ...s.home },
+        deploy: { ...defaultConfig.deploy, ...s.deploy },
+      }
+    }
   } catch {}
   return defaultConfig
 }

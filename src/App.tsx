@@ -8,7 +8,7 @@ import InfoButton from './components/InfoButton'
 import ProteinViewer from './components/ProteinViewer'
 import type { Protein, ModelId, BackendId, LaneStatus, PredictResponse } from './types'
 import { BACKENDS } from './backends'
-import { submitRun, pollStatus, pollEvents, pollTpuStatus, type TpuStatus } from './api'
+import { submitRun, pollStatus, pollEvents, listEventNames, pollTpuStatus, wakeStateServer, type TpuStatus } from './api'
 import { theme, accentAlpha, useConfig } from './config'
 import SetupWizard from './components/SetupWizard'
 
@@ -29,6 +29,17 @@ function initLaneStatus(backendId: BackendId): LaneStatus {
   return { backendId, state: 'idle', startedAt: null, completedAt: null, elapsedMs: 0, costAccumulated: 0, result: null, error: null, talkTrackSlide: b.talkTrackSlide, talkTrackLabel: b.talkTrackLabel }
 }
 
+// Slurm node names that aren't the name of the TPU behind them. slurmd on the TPU nih-v6e-e5b
+// (us-east5-b) registers as nihprotein-tpuv6eeast5a-0, and run_backend.sh reports SLURMD_NODENAME,
+// so the console link needs the TPU's own name.
+const TPU_FOR_SLURM_NODE: Record<string, string> = { 'nihprotein-tpuv6eeast5a-0': 'nih-v6e-e5b' }
+
+// Enter / ArrowRight advance along SLIDE_ORDER and ArrowLeft walks it back, so the two directions
+// can't drift apart. The summit cut presents 10 slides after home; 'models1' is the last manual slide.
+const SLIDE_ORDER: Phase[] = [
+  'running', 'catalog', 'pd1', 'img', 'catalog2', 'catalog4', 'md1', 'tpu1', 'tpu3', 'models1',
+]
+
 export default function App() {
   const { config } = useConfig()
   const [wizardOpen, setWizardOpen] = useState(false)
@@ -41,11 +52,14 @@ export default function App() {
   const [selectedZone, setSelectedZone] = useState<ZoneInfo | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [dispatchLines, setDispatchLines] = useState<string[]>([])
+  // Shown on the home terminal. The dispatch lines only render off home, so a failed submit
+  // written there was invisible and the presenter saw nothing happen.
+  const [submitError, setSubmitError] = useState<string | null>(null)
   const [infoOpen, setInfoOpen] = useState(false)
   const lineQueue = useRef<import('./api').SlurmEvent[]>([])
   const dripRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [zoneStates, setZoneStates] = useState<Record<string, MarkerState>>({})
-  const [vmStates, setVmStates] = useState<Record<string, { name: string, zone: string, state: string, href: string }>>({})
+  const [vmStates, setVmStates] = useState<Record<string, { name: string, zone: string, state: string, href: string, partition?: string }>>({})
   const [tpuStatus, setTpuStatus] = useState<TpuStatus | null>(null)
 
   const isMd = phase === 'md1' || phase === 'md2' || phase === 'md3'
@@ -72,23 +86,34 @@ export default function App() {
   const showPartitionChips = phase === 'pd2'
   const showSliceViz = phase === 'img'
 
-  const lastEventCount = useRef(0)
+  // GCS names of event objects already queued for this run, or belonging to an earlier run.
+  const seenEvents = useRef<Set<string>>(new Set())
+  // Bumped by every startPolling. A poll that began under an older run drops its results.
+  const pollGen = useRef(0)
+  // True once this tab has seen a lane in a live state during the current run. The first poll lands
+  // before predict.sh clears the previous run's blobs, which all read done or failed, so stopping on
+  // all_complete alone ended polling about 2 s into every run and froze the terminal and ladder.
+  const sawRunActive = useRef(false)
+  // One poll at a time. A poll fetches every event object and takes longer than the 2 s interval, so
+  // overlapping polls stacked up and could both ingest the same new events, printing lines twice.
+  const pollBusy = useRef(false)
   const terminalRef = useRef<HTMLDivElement>(null)
   const terminalDone = useRef(false)
 
   function consoleUrl(ev: { vm?: string | null, zone?: string, partition?: string, project?: string }): string {
     if (!ev.vm || !ev.zone || !ev.project) return ''
-    if (ev.partition === 'tpu')
-      return `https://console.cloud.google.com/compute/tpus/details/${ev.zone}/${ev.vm}?project=${ev.project}`
+    if (ev.partition === 'tpu' || ev.partition === 'spot-tpu')
+      return `https://console.cloud.google.com/compute/tpus/details/${ev.zone}/${TPU_FOR_SLURM_NODE[ev.vm] ?? ev.vm}?project=${ev.project}`
     return `https://console.cloud.google.com/compute/instancesDetail/zones/${ev.zone}/instances/${ev.vm}?project=${ev.project}`
   }
 
   const startPolling = useCallback(() => {
     if (pollRef.current) clearInterval(pollRef.current)
     if (dripRef.current) clearTimeout(dripRef.current)
-    lastEventCount.current = 0
     lineQueue.current = []
     terminalDone.current = false
+    sawRunActive.current = false
+    pollBusy.current = false
 
     const drainNext = () => {
       if (lineQueue.current.length === 0) {
@@ -154,14 +179,14 @@ export default function App() {
               setVmStates(prev => {
                 const existing = prev[ev.vm!]
                 if (existing && (existing.state === 'active' || existing.state === 'done')) return prev
-                return { ...prev, [ev.vm!]: { name: ev.vm!, zone: region, state: 'provisioning', href: existing?.href || consoleUrl(ev) } }
+                return { ...prev, [ev.vm!]: { name: ev.vm!, zone: region, state: 'provisioning', href: existing?.href || consoleUrl(ev), partition: ev.partition || existing?.partition } }
               })
             }
             break
           case 'allocate':
             if (ev.vm) {
               setZoneStates(prev => ({ ...prev, [region]: 'active' }))
-              setVmStates(prev => ({ ...prev, [ev.vm!]: { name: ev.vm!, zone: region, state: 'active', href: consoleUrl(ev) } }))
+              setVmStates(prev => ({ ...prev, [ev.vm!]: { name: ev.vm!, zone: region, state: 'active', href: consoleUrl(ev), partition: ev.partition || prev[ev.vm!]?.partition } }))
             }
             break
           case 'done':
@@ -207,51 +232,68 @@ export default function App() {
       dripRef.current = setTimeout(drainNext, delay) as any
     }
     dripRef.current = setTimeout(drainNext, 500) as any
+    const gen = ++pollGen.current
     pollRef.current = setInterval(async () => {
+      if (pollBusy.current) return
+      pollBusy.current = true
       try {
         const [status, events] = await Promise.all([
           pollStatus(),
-          pollEvents(),
+          pollEvents(seenEvents.current),
         ])
+        // A newer run started while this poll was in flight: its refs aren't ours to touch.
+        if (gen !== pollGen.current) return
 
-        if (events.length > lastEventCount.current) {
-          const newEvents = events.slice(lastEventCount.current)
-            .filter(e => e.type !== 'node_up' && e.type !== 'slurmctld')
-          if (newEvents.length > 0) {
-            lineQueue.current.push(...newEvents)
-          }
-          lastEventCount.current = events.length
+        // Queue each event object once, keyed by its GCS name. A running count broke two ways: a
+        // transient fetch failure shortened the list and replayed the whole log, and a late write
+        // that sorted into the middle was skipped. Names already seen at submit are the previous
+        // run's, so the first poll, which lands before predict.sh wipes the log, replays none.
+        const fresh = events.filter(e => e._name && !seenEvents.current.has(e._name))
+        for (const e of fresh) seenEvents.current.add(e._name!)
+        const visible = fresh.filter(e => e.type !== 'node_up' && e.type !== 'slurmctld')
+        if (visible.length > 0) lineQueue.current.push(...visible)
+
+        if (Object.values(status.lanes).some(b => b.state !== 'done' && b.state !== 'failed' && b.state !== 'idle')) {
+          sawRunActive.current = true
         }
 
-        // Update side ladder directly from GCS backend blobs (authoritative, not drip-delayed)
-        for (const [bid, blob] of Object.entries(status.lanes)) {
-          const backendId = bid as BackendId
-          if (!BACKENDS.some(b => b.id === backendId)) continue
-          const s = blob.state as LaneStatus['state']
-          if (s === 'done' || s === 'failed') {
-            setLanes(prev => {
-              if (prev[backendId]?.state === s) return prev
-              return { ...prev, [backendId]: { ...prev[backendId], state: s, elapsedMs: blob.elapsed_ms || 0, costAccumulated: blob.cost_accumulated || 0, completedAt: blob.completed_at ? new Date(blob.completed_at).getTime() : null } }
-            })
+        // Update the side ladder directly from the GCS lane blobs (authoritative, not drip-delayed),
+        // but only once this run is live. Until predict.sh resets them, the blobs still hold the
+        // previous run's finished lanes and costs.
+        if (sawRunActive.current) {
+          for (const [bid, blob] of Object.entries(status.lanes)) {
+            const backendId = bid as BackendId
+            if (!BACKENDS.some(b => b.id === backendId)) continue
+            const s = blob.state as LaneStatus['state']
+            if (s === 'done' || s === 'failed') {
+              setLanes(prev => {
+                if (prev[backendId]?.state === s) return prev
+                return { ...prev, [backendId]: { ...prev[backendId], state: s, elapsedMs: blob.elapsed_ms || 0, costAccumulated: blob.cost_accumulated || 0, completedAt: blob.completed_at ? new Date(blob.completed_at).getTime() : null } }
+              })
+            }
           }
         }
 
-        if (status.all_complete) {
+        if (status.all_complete && sawRunActive.current) {
           if (pollRef.current) clearInterval(pollRef.current)
           pollRef.current = null
         }
       } catch (err) {
         console.error('Poll error:', err)
+      } finally {
+        if (gen === pollGen.current) pollBusy.current = false
       }
     }, 2000)
   }, [])
 
   useEffect(() => {
-    const tpuPoll = setInterval(async () => {
-      const s = await pollTpuStatus()
-      if (s) setTpuStatus(s)
-    }, 10000)
-    pollTpuStatus().then(s => { if (s) setTpuStatus(s) })
+    // A blocked fetch rejects. Catch it so the badge stays on its last value instead of
+    // throwing an unhandled rejection every 10 s into the console the presenter debugs from.
+    const refreshTpu = () => pollTpuStatus()
+      .then(s => { if (s) setTpuStatus(s) })
+      .catch(err => console.warn('TPU status poll failed:', err))
+    const tpuPoll = setInterval(refreshTpu, 10000)
+    refreshTpu()
     return () => {
       clearInterval(tpuPoll)
       if (pollRef.current) clearInterval(pollRef.current)
@@ -259,6 +301,15 @@ export default function App() {
     }
   }, [])
 
+  // While the home slide waits for Enter, keep the state server warm: a call on load, then one every
+  // 5 minutes, inside Cloud Run's 15-minute idle window. Failures only warn; the submit still works.
+  useEffect(() => {
+    if (phase !== 'home') return
+    const wake = () => wakeStateServer().catch(err => console.warn('State server wake failed:', err))
+    wake()
+    const wakeTimer = setInterval(wake, 5 * 60 * 1000)
+    return () => clearInterval(wakeTimer)
+  }, [phase])
 
   useEffect(() => {
     if (terminalRef.current) {
@@ -267,8 +318,15 @@ export default function App() {
   }, [dispatchLines])
 
   const handleSubmit = useCallback(async () => {
+    setSubmitError(null)
     try {
+      // Every event object already in the log belongs to an earlier run. Mark them seen before
+      // submitting. Keyed on object names rather than timestamps, so a presenter laptop with a
+      // skewed clock can't drop the new run's events.
+      const stale = await listEventNames().catch(() => [] as string[])
       const result = await submitRun(currentProtein.id)
+      // Attaching to a run already in flight: replay its events instead of hiding them.
+      seenEvents.current = new Set(result.already_running ? [] : stale)
       // already_running = the server saw an in-flight run and didn't write a
       // new trigger. Skip the local-state reset and just attach to the
       // existing run via polling. Without this skip, a second-presser's tab
@@ -283,13 +341,12 @@ export default function App() {
       startPolling()
     } catch (err) {
       console.error('Submit failed:', err)
-      setDispatchLines([`Error: ${err}`])
+      setSubmitError(`sbatch: error: submit failed (${err instanceof Error ? err.message : String(err)})`)
       setPhase('home')
     }
   }, [currentProtein, startPolling])
 
-  // Enter + Arrow keys advance the narrative: home → run → catalog → done
-  // ArrowLeft navigates back through the same sequence
+  // Enter + Arrow keys walk SLIDE_ORDER: home → run → catalog → … → pse
   React.useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (wizardOpen) return
@@ -301,31 +358,17 @@ export default function App() {
           if (hasActiveRun) setPhase('running')
           else handleSubmit()
         }
-        else if (phase === 'dispatching' || phase === 'running') setPhase('catalog')
-        else if (phase === 'catalog') setPhase('pd1')
-        else if (phase === 'pd1') setPhase('img')
-        else if (phase === 'img') setPhase('catalog2')
-        else if (phase === 'catalog2') setPhase('catalog4')
-        else if (phase === 'catalog4') setPhase('md1')
-        else if (phase === 'md1') setPhase('tpu1')
-        else if (phase === 'tpu1') setPhase('tpu3')
-        else if (phase === 'tpu3') setPhase('models1')
-        // 'models1' is the final manual slide — 'done' is set by polling when inference completes
-        // 'done' stays
+        else {
+          // Advance along SLIDE_ORDER; 'dispatching' sits at the same spot as 'running'.
+          const i = SLIDE_ORDER.indexOf(phase === 'dispatching' ? 'running' : phase)
+          if (i >= 0 && i < SLIDE_ORDER.length - 1) setPhase(SLIDE_ORDER[i + 1])
+        }
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault()
-        if (phase === 'done') setPhase('models1')
-        else if (phase === 'models1') setPhase('tpu3')
-        else if (phase === 'tpu3') setPhase('tpu1')
-        else if (phase === 'tpu1') setPhase('md1')
-        else if (phase === 'md1') setPhase('catalog4')
-        else if (phase === 'catalog4') setPhase('catalog2')
-        else if (phase === 'catalog2') setPhase('img')
-        else if (phase === 'img') setPhase('pd1')
-        else if (phase === 'pd1') setPhase('catalog')
-        else if (phase === 'catalog') setPhase('running')
-        else if (phase === 'running' || phase === 'dispatching') setPhase('home')
-        // 'home' stays
+        const i = SLIDE_ORDER.indexOf(phase === 'dispatching' ? 'running' : phase)
+        if (phase === 'done') setPhase(SLIDE_ORDER[SLIDE_ORDER.length - 1])
+        else if (i === 0) setPhase('home')
+        else if (i > 0) setPhase(SLIDE_ORDER[i - 1])
       }
     }
     window.addEventListener('keydown', handler)
@@ -435,8 +478,11 @@ export default function App() {
         <div style={{ color: '#d3d3d3' }}>{`researcher@${config.home.loginNode}:~$ `}<span style={{ color: 'var(--accent-term)' }}>sbatch predict.sh \</span></div>
         <div style={{ color: 'var(--accent-term)' }}>  --model=all --target=both --protein={currentProtein.id} \</div>
         <div style={{ color: 'var(--accent-term)' }}>  --requeue --partition=tpu,gpu</div>
+        {phase === 'home' && submitError && (
+          <div className="terminal-line" style={{ marginTop: 6, color: '#EF4035' }}>{submitError}</div>
+        )}
         {phase === 'home' && (
-          <div style={{ marginTop: 6, color: '#708090', fontSize: '1.1vmin' }}>Press Enter to submit</div>
+          <div style={{ marginTop: 6, color: '#708090', fontSize: '1.1vmin' }}>{submitError ? 'Press Enter to retry' : 'Press Enter to submit'}</div>
         )}
         {phase !== 'home' && dispatchLines.length > 0 && (
           <>
@@ -545,7 +591,7 @@ export default function App() {
             { body: 'Researchers are familiar with PyTorch; historically TPU required JAX. <a href="https://developers.googleblog.com/torchtpu-running-pytorch-natively-on-tpus-at-google-scale/" target="_blank">TorchTPU</a> runs PyTorch natively on TPU — the diff between our <a href="https://github.com/WandLZhang/ai-infra-demo-proteins/blob/main/backends/esmfold-gpu/predict.py" target="_blank">GPU backend</a> and <a href="https://github.com/WandLZhang/ai-infra-demo-proteins/blob/main/backends/esmfold-tpu/predict.py" target="_blank">TPU backend</a> for ESMFold is just <b>four lines</b>:<pre style="background: #0a0a0a; border: 1px solid #2a2a2a; padding: 12px; margin: 10px 0; overflow-x: auto; font-size: 11px; line-height: 1.45; color: #eee;"><code>import torch\n<span style="color: var(--accent-term);">import torch_xla                              # NEW</span>\n<span style="color: var(--accent-term);">torch_xla.experimental.eager_mode(True)       # NEW</span>\n<span style="color: var(--accent-term);">import torch_xla.core.xla_model as xm         # NEW</span>\n\n<span style="color: var(--accent-term);">device = xm.xla_device()                      # CHANGED (was "cuda")</span>\nmodel = EsmForProteinFolding.from_pretrained(_MODEL_ID).to(device)\nwith torch.no_grad():\n    output = model(**inputs)</code></pre>' },
           ] :
           phase === 'models1' ? [
-            { body: 'In the <a href="https://www.nature.com/nature-index/research-leaders/2025/institution/corporate/all/global" target="_blank">Nature Index corporate research rankings</a>, <b>Alphabet is #3 globally</b>, behind only Roche and AstraZeneca. <b>Microsoft is #27. Amazon is #90.</b> Google publishes <b>300+ health publications a year, 15+ in JAMA, 50+ in Nature</b>.\n\n<b>Science model catalog:</b>\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://deepmind.google/technologies/alphafold/" target="_blank"><b>AlphaFold</b></a> — Nobel Prize in Chemistry 2024 (John Jumper). <a href="https://deepmind.google/blog/alphafold-five-years-of-impact/" target="_blank">Used by 3 million researchers across 190+ countries as of Q1 2026</a>, the most-cited tool in life-science AI history.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://deepmind.google/technologies/alphagenome/" target="_blank"><b>AlphaGenome</b></a> — predicts 5,930 human genome tracks across diverse cell types and 11 output modalities. Cracks the 98% of non-coding DNA that no prior model could meaningfully interpret.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://research.google/blog/accelerating-scientific-breakthroughs-with-an-ai-co-scientist/" target="_blank"><b>AI Co-Scientist</b></a> — proposed the same antimicrobial-resistance hypothesis Prof. José Penadés\' Imperial College lab had reached through a decade of bench work — in hours, not years, which Stanford\'s Gary Peltz, who used it to identify the cancer drug Vorinostat as a liver-fibrosis candidate, <a href="https://www.technologyreview.com/2026/05/22/1137813/google-i-o-showed-how-the-path-for-ai-science-is-shifting/" target="_blank">called <i>"consulting the oracle of Delphi"</i></a> (<a href="https://www.cell.com/cell/fulltext/S0092-8674(25)00973-0" target="_blank"><i>Cell</i>, Sep 2025</a>; <a href="https://advanced.onlinelibrary.wiley.com/doi/10.1002/advs.202508751" target="_blank"><i>Advanced Science</i>, Sep 2025</a>).</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://blog.google/innovation-and-ai/technology/research/gemini-for-science-io-2026/" target="_blank"><b>ERA (Empirical Research Assistance)</b></a> — beat the CDC\'s own COVID-19 hospitalization forecasting ensemble in head-to-head benchmarks (<a href="https://www.nature.com/articles/s41586-026-10658-6" target="_blank"><i>Nature</i>, May 2026</a>).</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://deepmind.google/technologies/alphaevolve/" target="_blank"><b>AlphaEvolve</b></a> — agentic research engine that generates and scores thousands of algorithm variations in parallel. Manufacturing companies are using it in production to accelerate supply-chain decisions across global networks.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://research.google/blog/fast-accurate-climate-modeling-with-neuralgcm/" target="_blank"><b>WeatherNext</b></a> — highlighted in I/O keynote as providing advance landfall warning for Hurricane Melissa to Jamaica that likely saved lives.</li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://github.com/google/deepvariant" target="_blank"><b>DeepVariant</b></a>, <a href="https://cloud.google.com/vertex-ai/generative-ai/docs/model-garden/explore-models" target="_blank"><b>TxGemma-9B</b></a>, <a href="https://cloud.google.com/vertex-ai/generative-ai/docs/model-garden/explore-models" target="_blank"><b>MedSigLIP</b></a>, <a href="https://deepmind.google/technologies/alphaearth/" target="_blank"><b>AlphaEarth Foundations</b></a>, and many more — variant calling, therapeutic LLM, medical multimodal, environmental sensing.</li></ul>\n\nGoogle invented the substrate the whole industry runs on — the <a href="https://arxiv.org/abs/1706.03762" target="_blank">Transformer</a>, <a href="https://www.tensorflow.org/" target="_blank">TensorFlow</a>, <a href="https://kubernetes.io/" target="_blank">Kubernetes</a>, and <a href="https://jax.readthedocs.io/" target="_blank">JAX</a> — so you get both halves of the stack, the infrastructure and the science, from one place. And it\'s bought the way public research is funded: fixed-price <a href="https://cloud.google.com/edu/researchers" target="_blank">PSSA</a> with incentives through GPAR.' },
+            { body: 'In the <a href="https://www.nature.com/nature-index/research-leaders/2025/institution/corporate/all/global" target="_blank">Nature Index corporate research rankings</a>, <b>Alphabet is #3 globally</b>, behind only Roche and AstraZeneca. <b>Microsoft is #27. Amazon is #90.</b> Google publishes <b>300+ health publications a year, 15+ in JAMA, 50+ in Nature</b>.\n\n<b>Science model catalog:</b>\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://deepmind.google/technologies/alphafold/" target="_blank"><b>AlphaFold</b></a> — Nobel Prize in Chemistry 2024 (John Jumper). <a href="https://deepmind.google/blog/alphafold-five-years-of-impact/" target="_blank">Used by 3 million researchers across 190+ countries as of Q1 2026</a>, the most-cited tool in life-science AI history.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://deepmind.google/science/alphagenome/" target="_blank"><b>AlphaGenome</b></a> — predicts 5,930 human genome tracks across diverse cell types and 11 output modalities. Cracks the 98% of non-coding DNA that no prior model could meaningfully interpret.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://research.google/blog/accelerating-scientific-breakthroughs-with-an-ai-co-scientist/" target="_blank"><b>AI Co-Scientist</b></a> — proposed the same antimicrobial-resistance hypothesis Prof. José Penadés\' Imperial College lab had reached through a decade of bench work — in hours, not years, which Stanford\'s Gary Peltz, who used it to identify the cancer drug Vorinostat as a liver-fibrosis candidate, <a href="https://www.technologyreview.com/2026/05/22/1137813/google-i-o-showed-how-the-path-for-ai-science-is-shifting/" target="_blank">called <i>"consulting the oracle of Delphi"</i></a> (<a href="https://www.cell.com/cell/fulltext/S0092-8674(25)00973-0" target="_blank"><i>Cell</i>, Sep 2025</a>; <a href="https://advanced.onlinelibrary.wiley.com/doi/10.1002/advs.202508751" target="_blank"><i>Advanced Science</i>, Sep 2025</a>).</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://blog.google/innovation-and-ai/technology/research/gemini-for-science-io-2026/" target="_blank"><b>ERA (Empirical Research Assistance)</b></a> — beat the CDC\'s own COVID-19 hospitalization forecasting ensemble in head-to-head benchmarks (<a href="https://www.nature.com/articles/s41586-026-10658-6" target="_blank"><i>Nature</i>, May 2026</a>).</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://deepmind.google/technologies/alphaevolve/" target="_blank"><b>AlphaEvolve</b></a> — agentic research engine that generates and scores thousands of algorithm variations in parallel. Manufacturing companies are using it in production to accelerate supply-chain decisions across global networks.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://research.google/blog/fast-accurate-climate-modeling-with-neuralgcm/" target="_blank"><b>WeatherNext</b></a> — highlighted in I/O keynote as providing advance landfall warning for Hurricane Melissa to Jamaica that likely saved lives.</li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://github.com/google/deepvariant" target="_blank"><b>DeepVariant</b></a>, <a href="https://cloud.google.com/vertex-ai/generative-ai/docs/model-garden/explore-models" target="_blank"><b>TxGemma-9B</b></a>, <a href="https://cloud.google.com/vertex-ai/generative-ai/docs/model-garden/explore-models" target="_blank"><b>MedSigLIP</b></a>, <a href="https://deepmind.google/technologies/alphaearth/" target="_blank"><b>AlphaEarth Foundations</b></a>, and many more — variant calling, therapeutic LLM, medical multimodal, environmental sensing.</li></ul>\n\nGoogle invented the substrate the whole industry runs on — the <a href="https://arxiv.org/abs/1706.03762" target="_blank">Transformer</a>, <a href="https://www.tensorflow.org/" target="_blank">TensorFlow</a>, <a href="https://kubernetes.io/" target="_blank">Kubernetes</a>, and <a href="https://jax.readthedocs.io/" target="_blank">JAX</a> — so you get both halves of the stack, the infrastructure and the science, from one place. And it\'s bought the way public research is funded: fixed-price <a href="https://cloud.google.com/edu/researchers" target="_blank">PSSA</a> with incentives through GPAR.' },
           ] :
           phase === 'models2' ? [
             { body: 'James Manyika and Pushmeet Kohli launched an agentic platform aimed at automating the most labor-intensive phases of research, called <a href="https://blog.google/innovation-and-ai/technology/research/gemini-for-science-io-2026/" target="_blank">Gemini for Science</a>. Register at <a href="https://labs.google/science" target="_blank">labs.google/science</a>.\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Hypothesis Generation</b> (built on Co-Scientist) — multi-agent <i>"idea tournament"</i> where hypotheses are generated, debated, and verified with clickable citations.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Computational Discovery</b> (built on AlphaEvolve + ERA) — parallel code-variant search for scientific simulation.</li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Literature Insights</b> — agentic synthesis across the published corpus.</li></ul>\n<a href="https://github.com/google-deepmind/science-skills" target="_blank"><b>Science Skills</b></a> is a bundle that connects <a href="https://antigravity.google/" target="_blank"><b>Google Antigravity</b></a> agents to <b>30+ life-science databases</b>: UniProt, AlphaFold Database, AlphaGenome API, InterPro, and more. In Google\'s internal validation, a structural bioinformatics analysis on the <b>AK2 gene</b> that normally takes hours completed in <b>minutes</b>, surfacing new disease mechanism candidates. For your structural biologists, this collapses days of manual workflow into a single prompt.' },

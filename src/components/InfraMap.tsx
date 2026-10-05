@@ -103,7 +103,7 @@ export const ZONE_LOCATIONS: ZoneInfo[] = [
 interface InfraMapProps {
   lanes: Record<BackendId, LaneStatus>
   zoneStates: Record<string, MarkerState>
-  vmStates: Record<string, { name: string, zone: string, state: string, href: string }>
+  vmStates: Record<string, { name: string, zone: string, state: string, href: string, partition?: string }>
   onZoneClick: (zone: ZoneInfo) => void
   center: google.maps.LatLngLiteral
   zoom: number
@@ -146,7 +146,7 @@ const US_FEATURE_STYLE: google.maps.FeatureStyleOptions = {
 
 export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, center, zoom, homePosition, highlightUS, showSpokes, showHalos, mdLayer, showHyperdiskHub, showPartitionChips, showSliceViz }: InfraMapProps) {
   const { config } = useConfig()
-  const { isLoaded } = useJsApiLoader({ googleMapsApiKey: MAPS_API_KEY, libraries: MAPS_LIBRARIES })
+  const { isLoaded, loadError } = useJsApiLoader({ googleMapsApiKey: MAPS_API_KEY, libraries: MAPS_LIBRARIES })
 
   // Two map instances stacked, cross-fade between them.
   const mapARef = useRef<google.maps.Map | null>(null)
@@ -202,6 +202,13 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
     const g = (window as any).google?.maps
     if (!g) return
 
+    const dashes = (opacity: number) => [
+      {
+        icon: { path: 'M 0,-1 0,1', strokeOpacity: opacity, strokeColor: theme.accent, scale: 2 },
+        offset: '0',
+        repeat: '12px',
+      },
+    ]
     const polylines = ZONE_LOCATIONS.map(zone =>
       new g.Polyline({
         path: [US_BUCKET_LABEL_POSITION, { lat: zone.lat, lng: zone.lng }],
@@ -209,27 +216,19 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
         strokeOpacity: 0,
         clickable: false,
         zIndex: 2,
-        icons: [
-          {
-            icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.3, strokeColor: theme.accent, scale: 2 },
-            offset: '0',
-            repeat: '12px',
-          },
-        ],
+        icons: dashes(0.3),
         map,
       })
     )
 
-    // Pulse the dash opacity with a sine wave so all spokes breathe in unison.
+    // Pulse the dash opacity with a sine wave so all spokes breathe in unison. Each tick sets a fresh
+    // icon list: p.get('icons') returned undefined here, so reading it back threw 20 times a second
+    // while a spokes slide was up, and the dashes never pulsed.
     let t = 0
     const interval = setInterval(() => {
       t += 0.08
       const opacity = 0.5 + 0.4 * Math.sin(t)
-      polylines.forEach(p => {
-        const icons = p.get('icons')
-        icons[0].icon.strokeOpacity = opacity
-        p.set('icons', icons)
-      })
+      polylines.forEach(p => p.setOptions({ icons: dashes(opacity) }))
     }, 50)
 
     return () => {
@@ -290,7 +289,10 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
     back.setCenter(center)
 
     const preloadMs = 500
-    const stepCount = startZoom - zoom
+    // Step toward the target in either direction. This used to count down only, so a zoom-in
+    // (wide view back to home at 12) ran zero steps and the deck sat at the midpoint zoom.
+    const dir = zoom > startZoom ? 1 : -1
+    const stepCount = Math.abs(zoom - startZoom)
     const msPerStep = 50
 
     // Begin cross-fade after tile preload
@@ -301,7 +303,7 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
 
     // Step zoom 1 level at a time, each step exactly msPerStep apart
     for (let i = 1; i <= stepCount; i++) {
-      const z = startZoom - i
+      const z = startZoom + dir * i
       const timer = setTimeout(() => {
         if (back) {
           back.setZoom(z)
@@ -315,6 +317,20 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
       timersRef.current = []
     }
   }, [center.lat, center.lng, zoom])
+
+  // A blocked Maps script (proxy, bad key, missing referrer) sets loadError and leaves isLoaded
+  // false forever. Say so instead of showing "Loading map..." for the rest of the talk.
+  if (loadError) {
+    return (
+      <div style={{ width: '100vw', height: '100vh', background: '#F7F7F7', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ color: '#EF4035', fontFamily: 'Courier New, monospace', fontSize: 14, maxWidth: 560, textAlign: 'center', lineHeight: 1.5 }}>
+          Map failed to load: {loadError.message}
+          <br />
+          <span style={{ color: '#708090' }}>Check the network or proxy, and that this hostname is on the Maps key's referrer list.</span>
+        </div>
+      </div>
+    )
+  }
 
   if (!isLoaded) {
     return (
@@ -433,6 +449,7 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
             name: vm.name,
             href: vm.href,
             state: vm.state as MarkerState,
+            partition: vm.partition,
           }))
         return (
           <ZoneMarker
