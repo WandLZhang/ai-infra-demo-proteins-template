@@ -70,6 +70,8 @@ export default function App() {
     phase === 'tpu2' ? ['af2-tpu', 'esmfold-tpu', 'boltz2-tpu'] :
     phase === 'tpu3' ? ['esmfold-tpu', 'esmfold-gpu'] :
     []
+  // The ladder's TPU-vs-GPU cost ratio waits for the TPU slides, where the talk makes that comparison.
+  const showCostRatio = SLIDE_ORDER.indexOf(phase) >= SLIDE_ORDER.indexOf('tpu1')
   const mapCenter = phase === 'home'
     ? config.home.cameraLatLng  // camera offset S+E of the home marker so the spinner sits above the terminal
     : isMd || isPd1
@@ -496,7 +498,7 @@ export default function App() {
       </div>
 
       {/* Side ladder — always visible, fills with values as backends complete */}
-      <SideLadder lanes={lanes} onSelect={() => {}} highlightBackends={sideLadderHighlight} />
+      <SideLadder lanes={lanes} onSelect={() => {}} highlightBackends={sideLadderHighlight} showCostRatio={showCostRatio} />
       <ProteinViewer visible={isModels} />
 
       {/* Location paper — key only changes on home↔cloud transitions, so the protein "comes in"
