@@ -68,7 +68,7 @@ Finally, the deepest workload is tightly-coupled MPI — molecular dynamics, flu
 
 ## 9. TPUs  *(slide: `tpu1`)*
 
-Moving past GPUs, about 90% of [gen-AI unicorns run on Google](https://cloud.google.com/ai-infrastructure) — and a major reason is the TPU differentiator. [Anthropic](https://www.anthropic.com/news/expanding-our-use-of-google-cloud-tpus-and-services) runs Claude on up to a million chips, OpenAI serves ChatGPT inference on TPU, and [Midjourney](https://cloud.google.com/customers/midjourney)'s monthly bill dropped from $2M to $700K. The economics are structural: TPUs run 30 to 40% cheaper than the top NVIDIA chips ([SemiAnalysis](https://newsletter.semianalysis.com/p/tpuv7-google-takes-a-swing-at-the)), at higher utilization, on 42% less power per rack.
+Moving past GPUs, about 90% of [gen-AI unicorns run on Google](https://cloud.google.com/ai-infrastructure) — and a major reason is the TPU differentiator. [Anthropic](https://www.anthropic.com/news/expanding-our-use-of-google-cloud-tpus-and-services) runs Claude on up to a million chips, and OpenAI serves ChatGPT inference on TPU. The economics are structural: TPUs run 30 to 40% cheaper than the top NVIDIA chips ([SemiAnalysis](https://newsletter.semianalysis.com/p/tpuv7-google-takes-a-swing-at-the)), at higher utilization, on 42% less power per rack.
 
 (point out our outputs)
 
