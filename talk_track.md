@@ -50,11 +50,11 @@ Single-node, single-GPU jobs that fan out embarrassingly parallel — each job r
 - **ML model training** — hyperparameter sweeps, fine-tuning, reinforcement learning. Embarrassingly parallel across GPU nodes.
 - **Medical imaging AI** — pathology slides, radiology, MRI. PyTorch models that ran on shared consortium GPUs can land on GCP in minutes instead of waiting in queue.
 
-Model weights are served from [Hyperdisk ML](https://docs.google.com/kubernetes-engine/docs/how-to/persistent-volumes/hyperdisk-ml). **One volume serves 2,500 instances at 1.2 TiB/s aggregate**. An admin creates the volume and loads weights once; researchers' job scripts just read a local path.
+Model weights are served from [Hyperdisk ML](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/hyperdisk-ml). **One volume serves 2,500 instances at 1.2 TiB/s aggregate**. An admin creates the volume and loads weights once; researchers' job scripts just read a local path.
 
 One layer up at the host, [BoltVMs](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/fast-starting-nodes) are pre-initialized GPU nodes that keep the boot, driver, and container runtime warm — **H100 cold-start drops from 15 minutes to 2**.
 
-And at the workload layer, [Pod Snapshots](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/checkpoint-restore) snapshot full pod state and restore in seconds — **80% faster warm restart for a 70B-parameter model**. Standard K8s pod restart in AWS EKS or AKS reloads model weights from scratch.
+And at the workload layer, [Pod Snapshots](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots) snapshot full pod state and restore in seconds — **80% faster warm restart for a 70B-parameter model**. Standard K8s pod restart in AWS EKS or AKS reloads model weights from scratch.
 
 ---
 
@@ -63,7 +63,7 @@ And at the workload layer, [Pod Snapshots](https://docs.cloud.google.com/kuberne
 The background sbatch demo follows the Independent GPU Jobs pattern, dispatching across consumption models:
 
 - [**3-Year CUD + Zonal Reservation**](https://cloud.google.com/compute/docs/instances/committed-use-discounts-overview) — Lowest cost tier — competitive with on-prem $/GPU-hr. Locks in pricing for the full term; the reservation guarantees the hardware is there.
-- [**DWS Flex Start**](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/dws) — **guaranteed GPU or TPU capacity for up to 7 days per request**, with no reservation contract or minimum commitment. AWS Capacity Blocks require fixed-duration commitment and rigid sizing. AWS also [raised H200 prices 15%](https://www.datacenterknowledge.com/cloud/aws-raises-h200-prices) recently.
+- [**DWS Flex Start**](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/dws) — **guaranteed GPU or TPU capacity for up to 7 days per request**, with no reservation contract or minimum commitment. AWS Capacity Blocks require fixed-duration commitment and rigid sizing. AWS also [raised H200 prices 15%](https://www.theregister.com/off-prem/2026/01/05/aws-raises-gpu-prices-15-on-a-saturday/2652706) recently.
 - [**Calendar Mode**](https://docs.cloud.google.com/compute/docs/instances/future-reservations-calendar-mode-overview) — pick a start date and lock in guaranteed capacity for **up to 90 days**. Useful for runs planned against grant milestones.
 
 Google's [GKE hypercluster](https://cloud.google.com/blog/products/containers-kubernetes/whats-new-in-gke-at-next26) **manages 1 million chips across 256,000 nodes spanning multiple regions under a single control plane**. AWS announced EKS at 100,000 nodes in July 2025.
@@ -128,7 +128,7 @@ Hierarchical namespaces in buckets allow elegant folder renames — a finished j
 
 ## 11. H4D + Cloud RDMA (Falcon)  *(slide: `md2`)*
 
-[H4D](https://cloud.google.com/blog/products/compute/new-h4d-vms-optimized-for-hpc) is the HPC-optimized VM, purpose-built for tightly-coupled MPI. Hardware: **5th-gen AMD EPYC Turin, 192 vCPUs, up to 1.5 TB RAM, 200 Gbps** [Cloud RDMA](https://docs.cloud.google.com/compute/docs/instances/create-vm-with-rdma) via [Falcon](https://cloud.google.com/blog/products/networking/understanding-cloud-rdma-scalable-high-performance-networking), higher RAM and newer CPU generation than competitors. Published benchmarks: [GROMACS Lignocellulose](https://cloud.google.com/blog/products/compute/new-h4d-vms-optimized-for-hpc) at **2.8x over TCP** on 32 VMs with Falcon; Ansys Fluent **4.1x vs C2D**; OpenFOAM **5.2x vs C2D with 122% superlinear efficiency**.
+[H4D](https://cloud.google.com/blog/products/compute/new-h4d-vms-optimized-for-hpc) is the HPC-optimized VM, purpose-built for tightly-coupled MPI. Hardware: **5th-gen AMD EPYC Turin, 192 vCPUs, up to 1.5 TB RAM, 200 Gbps** [Cloud RDMA](https://docs.cloud.google.com/compute/docs/instances/create-vm-with-rdma) via [Falcon](https://cloud.google.com/blog/topics/systems/introducing-falcon-a-reliable-low-latency-hardware-transport), higher RAM and newer CPU generation than competitors. Published benchmarks: [GROMACS Lignocellulose](https://cloud.google.com/blog/products/compute/new-h4d-vms-optimized-for-hpc) at **2.8x over TCP** on 32 VMs with Falcon; Ansys Fluent **4.1x vs C2D**; OpenFOAM **5.2x vs C2D with 122% superlinear efficiency**.
 
 ---
 
@@ -146,13 +146,12 @@ Tightly-coupled simulation highlights these unique Google features:
 
 ## 13. TPUs  *(slide: `tpu1`)*
 
-Six organizations that evaluated NVIDIA and TPU at scale and chose TPU for their most demanding workloads:
+Five organizations that evaluated NVIDIA and TPU at scale and chose TPU for their most demanding workloads:
 
 - [Anthropic](https://www.anthropic.com/news/expanding-our-use-of-google-cloud-tpus-and-services) — **up to 1 million TPU chips for Claude**. The largest AI infrastructure commitment in the industry.
 - [OpenAI](https://www.networkworld.com/article/4015386/openai-tests-google-tpus-amid-rising-inference-cost-concerns.html) — production ChatGPT inference on TPU. Industry analysts put the savings at **20–40% cheaper than equivalent GPU inference**. Multi-year commitment, deepened with Ironwood (TPU v7) capacity.
 - [Apple](https://machinelearning.apple.com/research/introducing-apple-foundation-models) — trained Apple Foundation Models on **8,192 TPUv4 chips with 52% sustained MFU**.
 - [Meta](https://siliconangle.com/2026/02/26/google-meta-reportedly-strike-new-multibillion-dollar-ai-chip-deal/) — **multi-billion-dollar TPU lease in February 2026** for Llama training. Meta operates the largest single NVIDIA cluster in the industry (100,000+ H100s); they are diversifying, not switching, because TPU economics on inference and ranking workloads beat the GPU stack they already operate.
-- [Midjourney](https://cloud.google.com/customers/midjourney) — **monthly compute went from $2 million to $700,000** after migrating to TPU.
 - [Recursion Pharmaceuticals](https://cloud.google.com/customers/recursion) — drug discovery on TPU at scale.
 
 Google reports approximately [90% of generative AI unicorns](https://cloud.google.com/ai-infrastructure) run on Google Cloud AI infrastructure.
@@ -200,9 +199,9 @@ In the [Nature Index corporate research rankings](https://www.nature.com/nature-
 - [**AlphaGenome**](https://deepmind.google/science/alphagenome/) — predicts 5,930 human genome tracks across diverse cell types and 11 output modalities. Cracks the 98% of non-coding DNA that no prior model could meaningfully interpret.
 - [**AI Co-Scientist**](https://research.google/blog/accelerating-scientific-breakthroughs-with-an-ai-co-scientist/) — proposed the same antimicrobial-resistance hypothesis Prof. Jose Penades' Imperial College lab had reached through a decade of bench work — in hours, not years, which Stanford's Gary Peltz, who used it to identify the cancer drug Vorinostat as a liver-fibrosis candidate, [called *"consulting the oracle of Delphi"*](https://www.technologyreview.com/2026/05/22/1137813/google-i-o-showed-how-the-path-for-ai-science-is-shifting/) ([*Cell*, Sep 2025](https://www.cell.com/cell/fulltext/S0092-8674(25)00973-0); [*Advanced Science*, Sep 2025](https://advanced.onlinelibrary.wiley.com/doi/10.1002/advs.202508751)).
 - [**ERA (Empirical Research Assistance)**](https://blog.google/innovation-and-ai/technology/research/gemini-for-science-io-2026/) — beat the CDC's own COVID-19 hospitalization forecasting ensemble in head-to-head benchmarks ([*Nature*, May 2026](https://www.nature.com/articles/s41586-026-10658-6)).
-- [**AlphaEvolve**](https://deepmind.google/technologies/alphaevolve/) — agentic research engine that generates and scores thousands of algorithm variations in parallel. Manufacturing companies are using it in production to accelerate supply-chain decisions across global networks.
-- [**WeatherNext**](https://research.google/blog/fast-accurate-climate-modeling-with-neuralgcm/) — highlighted in I/O keynote as providing advance landfall warning for Hurricane Melissa to Jamaica that likely saved lives.
-- [**DeepVariant**](https://github.com/google/deepvariant), [**TxGemma-9B**](https://cloud.google.com/vertex-ai/generative-ai/docs/model-garden/explore-models), [**MedSigLIP**](https://cloud.google.com/vertex-ai/generative-ai/docs/model-garden/explore-models), [**AlphaEarth Foundations**](https://deepmind.google/technologies/alphaearth/), and many more — variant calling, therapeutic LLM, medical multimodal, environmental sensing.
+- [**AlphaEvolve**](https://deepmind.google/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/) — agentic research engine that generates and scores thousands of algorithm variations in parallel. Manufacturing companies are using it in production to accelerate supply-chain decisions across global networks.
+- [**WeatherNext**](https://deepmind.google/science/weathernext/) — highlighted in I/O keynote as providing advance landfall warning for Hurricane Melissa to Jamaica that likely saved lives.
+- [**DeepVariant**](https://github.com/google/deepvariant), [**TxGemma-9B**](https://developers.google.com/health-ai-developer-foundations/txgemma/model-card), [**MedSigLIP**](https://developers.google.com/health-ai-developer-foundations/medsiglip/model-card), [**AlphaEarth Foundations**](https://deepmind.google/blog/alphaearth-foundations-helps-map-our-planet-in-unprecedented-detail/), and many more — variant calling, therapeutic LLM, medical multimodal, environmental sensing.
 
 ---
 
