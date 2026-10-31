@@ -29,10 +29,13 @@ function initLaneStatus(backendId: BackendId): LaneStatus {
   return { backendId, state: 'idle', startedAt: null, completedAt: null, elapsedMs: 0, costAccumulated: 0, result: null, error: null, talkTrackSlide: b.talkTrackSlide, talkTrackLabel: b.talkTrackLabel }
 }
 
-// Slurm node names that aren't the name of the TPU behind them. slurmd on the TPU nih-v6e-e5b
-// (us-east5-b) registers as nihprotein-tpuv6eeast5a-0, and run_backend.sh reports SLURMD_NODENAME,
-// so the console link needs the TPU's own name.
-const TPU_FOR_SLURM_NODE: Record<string, string> = { 'nihprotein-tpuv6eeast5a-0': 'nih-v6e-e5b' }
+// Slurm node names that aren't the name of the TPU behind them. slurmd on nih-v5e-c1a (a v5e-4 in
+// us-central1-a) registers as nihprotein-tpuv6eeast5a-0, and run_backend.sh reports SLURMD_NODENAME,
+// so the console link, the map marker and the terminal show the TPU's own name.
+const TPU_FOR_SLURM_NODE: Record<string, string> = { 'nihprotein-tpuv6eeast5a-0': 'nih-v5e-c1a' }
+const nodeLabel = (vm: string) => TPU_FOR_SLURM_NODE[vm] ?? vm
+const showNodeNames = (msg: string) =>
+  Object.entries(TPU_FOR_SLURM_NODE).reduce((m, [slurm, tpu]) => m.split(slurm).join(tpu), msg)
 
 // Enter / ArrowRight advance along SLIDE_ORDER and ArrowLeft walks it back, so the two directions
 // can't drift apart. 'pse' is the last manual slide; 'done' is set by polling when inference completes.
@@ -104,7 +107,7 @@ export default function App() {
   function consoleUrl(ev: { vm?: string | null, zone?: string, partition?: string, project?: string }): string {
     if (!ev.vm || !ev.zone || !ev.project) return ''
     if (ev.partition === 'tpu' || ev.partition === 'spot-tpu')
-      return `https://console.cloud.google.com/compute/tpus/details/${ev.zone}/${TPU_FOR_SLURM_NODE[ev.vm] ?? ev.vm}?project=${ev.project}`
+      return `https://console.cloud.google.com/compute/tpus/details/${ev.zone}/${nodeLabel(ev.vm)}?project=${ev.project}`
     return `https://console.cloud.google.com/compute/instancesDetail/zones/${ev.zone}/instances/${ev.vm}?project=${ev.project}`
   }
 
@@ -128,7 +131,7 @@ export default function App() {
         if (ev.type === 'complete') {
           terminalDone.current = true
         } else {
-          setDispatchLines(prev => [...prev, ev.msg])
+          setDispatchLines(prev => [...prev, showNodeNames(ev.msg)])
         }
       }
 
@@ -180,14 +183,14 @@ export default function App() {
               setVmStates(prev => {
                 const existing = prev[ev.vm!]
                 if (existing && (existing.state === 'active' || existing.state === 'done')) return prev
-                return { ...prev, [ev.vm!]: { name: ev.vm!, zone: region, state: 'provisioning', href: existing?.href || consoleUrl(ev), partition: ev.partition || existing?.partition } }
+                return { ...prev, [ev.vm!]: { name: nodeLabel(ev.vm!), zone: region, state: 'provisioning', href: existing?.href || consoleUrl(ev), partition: ev.partition || existing?.partition } }
               })
             }
             break
           case 'allocate':
             if (ev.vm) {
               setZoneStates(prev => ({ ...prev, [region]: 'active' }))
-              setVmStates(prev => ({ ...prev, [ev.vm!]: { name: ev.vm!, zone: region, state: 'active', href: consoleUrl(ev), partition: ev.partition || prev[ev.vm!]?.partition } }))
+              setVmStates(prev => ({ ...prev, [ev.vm!]: { name: nodeLabel(ev.vm!), zone: region, state: 'active', href: consoleUrl(ev), partition: ev.partition || prev[ev.vm!]?.partition } }))
             }
             break
           case 'done':
