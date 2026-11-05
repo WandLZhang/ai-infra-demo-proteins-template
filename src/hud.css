@@ -1,3 +1,12 @@
+/* The protein column on the models slides. At least a third of a split-view window, so the
+   results read from the back of the room; the info panel and the TPU badge sit beside it. */
+:root {
+  --results-w: clamp(320px, 40vw, 640px);
+  /* The pd1, img and md overlays center in the gap between the terminal (22vw) and the slide panel (34vw)
+     instead of on the screen, so at laptop widths the panel doesn't cover their right end. */
+  --overlay-shift: calc((clamp(280px, 34vw, 480px) - clamp(200px, 22vw, 380px) + 2px) / 2);
+}
+
 .pac-container {
   z-index: 9999 !important;
   box-shadow: 0 4px 16px rgba(0,0,0,0.15) !important;
@@ -152,7 +161,7 @@
   display: inline-block;             /* size tightly to nested content, not parent width */
   /* Sit BELOW the us-central1 marker: doll's top edge sits 40px below the anchor
      lat/lng, so the spinner stays visible above. */
-  transform: translate(-50%, 40px);
+  transform: translate(calc(-50% - var(--overlay-shift)), 40px);
   padding: 36px 40px 32px;
   border: 1.5px solid transparent;
   position: relative;
@@ -172,8 +181,8 @@
   box-shadow: 0 2px 12px rgba(0,0,0,0.08);
 }
 @keyframes dollIn {
-  from { opacity: 0; transform: translate(-50%, 40px) scale(0.96); filter: blur(6px); }
-  to   { opacity: 1; transform: translate(-50%, 40px) scale(1);    filter: blur(0); }
+  from { opacity: 0; transform: translate(calc(-50% - var(--overlay-shift)), 40px) scale(0.96); filter: blur(6px); }
+  to   { opacity: 1; transform: translate(calc(-50% - var(--overlay-shift)), 40px) scale(1);    filter: blur(0); }
 }
 
 /* Top-center "tab" labels that sit on the border, breaking it cleanly. */
@@ -279,7 +288,7 @@
 .slice-viz {
   width: 460px;
   box-sizing: border-box;
-  transform: translate(-50%, 60px);
+  transform: translate(calc(-50% - var(--overlay-shift)), 60px);
   background: #fff;
   border: 1px solid var(--accent);
   padding: 14px 18px 12px;
@@ -355,7 +364,7 @@
   gap: 8px;
   /* Anchor stack so its top edge sits 40px below the us-central1 spinner,
      mirroring the MD doll's translate(-50%, 40px) positioning. */
-  transform: translate(-50%, 40px);
+  transform: translate(calc(-50% - var(--overlay-shift)), 40px);
   animation: softFadeIn 0.5s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .pd-stack-row {
@@ -567,6 +576,14 @@
   font-weight: 400;
   letter-spacing: 0.03em;
   margin-top: 8px;
+}
+/* The protein's plain-words description sits where the UniProt line was. */
+.location-paper-desc {
+  font-family: freight-sans-pro, sans-serif;
+  font-size: 1.3vw;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #707070;
 }
 /* Info box links and code */
 .info-body a {

@@ -19,6 +19,9 @@ function loadConfig(): InstitutionConfig {
         institution: { ...defaultConfig.institution, ...s.institution },
         home: { ...defaultConfig.home, ...s.home },
         deploy: { ...defaultConfig.deploy, ...s.deploy },
+        // The wizard doesn't edit these, so a saved copy would only hide later edits to the file.
+        memberSites: defaultConfig.memberSites,
+        content: defaultConfig.content,
       }
     }
   } catch {}

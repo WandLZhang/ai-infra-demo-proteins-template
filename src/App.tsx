@@ -8,21 +8,37 @@ import InfoButton from './components/InfoButton'
 import ProteinViewer from './components/ProteinViewer'
 import type { Protein, ModelId, BackendId, LaneStatus, PredictResponse } from './types'
 import { BACKENDS } from './backends'
-import { submitRun, pollStatus, pollEvents, listEventNames, pollTpuStatus, wakeStateServer, type TpuStatus } from './api'
+import { submitRun, pollStatus, pollEvents, listEventNames, pollTpuStatus, wakeStateServer, getManifest, type TpuStatus, type SlurmEvent } from './api'
 import { theme, accentAlpha, useConfig } from './config'
 import SetupWizard from './components/SetupWizard'
 
 const PROTEINS: Protein[] = [
-  { id: 'brca1', name: 'BRCA1 BRCT', sequence: 'NAMEESVSREKPELTASTERVNKRMS...', uniprotId: 'P38398', description: 'Breast cancer tumor suppressor — DNA repair', residueCount: 214 },
-  { id: 'p53', name: 'p53 DBD', sequence: 'SSSVPSQKTYQGSYGFRLGFLHSG...', uniprotId: 'P04637', description: 'Tumor suppressor — guardian of the genome', residueCount: 196 },
+  { id: 'brca1', name: 'BRCA1 BRCT', sequence: 'NAMEESVSREKPELTASTERVNKRMS...', uniprotId: 'P38398', description: 'Breast cancer tumor suppressor — DNA repair', residueCount: 260 },
+  { id: 'p53', name: 'p53 DBD', sequence: 'SSSVPSQKTYQGSYGFRLGFLHSG...', uniprotId: 'P04637', description: 'Tumor suppressor — guardian of the genome', residueCount: 139 },
   { id: 'ace2', name: 'ACE2 PD', sequence: 'QSTIEEQAKTFLDKFNHEAEDLF...', uniprotId: 'Q9BYF1', description: 'SARS-CoV-2 receptor — COVID-19 entry point', residueCount: 597 },
   { id: 'hemoglobin', name: 'Hemoglobin α', sequence: 'MVLSPADKTNVKAAWGKVGAHAG...', uniprotId: 'P69905', description: 'Oxygen transport — sickle cell disease target', residueCount: 142 },
-  { id: 'insulin', name: 'Insulin receptor', sequence: 'LRELGQGSFGMVYEGNARDIIK...', uniprotId: 'P06213', description: 'Diabetes — receptor tyrosine kinase', residueCount: 267 },
+  { id: 'insulin', name: 'Insulin receptor', sequence: 'LRELGQGSFGMVYEGNARDIIK...', uniprotId: 'P06213', description: 'Diabetes — receptor tyrosine kinase', residueCount: 144 },
   { id: 'cftr', name: 'CFTR NBD1', sequence: 'NLTTTEVVMENVTAFWEEGFGEL...', uniprotId: 'P13569', description: 'Cystic fibrosis transmembrane regulator', residueCount: 251 },
 ]
 
+const urlParams = new URLSearchParams(window.location.search)
+// ?follow=1 follows runs started outside this tab. Off by default: the map opens on the home campus, as every
+// demo does, and the presenter's Enter on the login node submits the run.
+const FOLLOW = urlParams.get('follow') === '1'
+// A link with ?run=<the run's submitted_at>, opened after the run has started, attaches the map to it at once
+// instead of waiting on home for the next run.
+const RUN_LINK = urlParams.get('run')
+
 // UX phases: zoomed on the home building (config.home.buildingName) → terminal → submit → zoom out → catalog → catalog2 → results
 type Phase = 'home' | 'dispatching' | 'running' | 'catalog' | 'catalog2' | 'catalog3' | 'catalog4' | 'md1' | 'md2' | 'md3' | 'pd1' | 'pd2' | 'img' | 'tpu1' | 'tpu2' | 'tpu3' | 'models1' | 'models2' | 'models3' | 'pse' | 'done'
+
+// Enter / ArrowRight advance along SLIDE_ORDER and ArrowLeft walks it back, so the two directions can't
+// drift apart. The order is the run of show's slides after home: the burst, the three workload shapes,
+// TPUs, and the science on models1, where the deck ends.
+const SLIDE_ORDER: Phase[] = [
+  'running', 'catalog', 'pd1', 'pd2', 'img', 'catalog2', 'catalog4', 'md1', 'md2', 'md3',
+  'tpu1', 'tpu2', 'tpu3', 'models1',
+]
 
 function initLaneStatus(backendId: BackendId): LaneStatus {
   const b = BACKENDS.find(b => b.id === backendId)!
@@ -37,12 +53,23 @@ const nodeLabel = (vm: string) => TPU_FOR_SLURM_NODE[vm] ?? vm
 const showNodeNames = (msg: string) =>
   Object.entries(TPU_FOR_SLURM_NODE).reduce((m, [slurm, tpu]) => m.split(slurm).join(tpu), msg)
 
-// Enter / ArrowRight advance along SLIDE_ORDER and ArrowLeft walks it back, so the two directions
-// can't drift apart. 'pse' is the last manual slide; 'done' is set by polling when inference completes.
-const SLIDE_ORDER: Phase[] = [
-  'running', 'catalog', 'pd1', 'pd2', 'img', 'catalog2', 'catalog3', 'catalog4',
-  'md1', 'md2', 'md3', 'tpu1', 'tpu2', 'tpu3', 'models1', 'models2', 'models3', 'pse',
-]
+// The terminal has to read in a split-view window, so each event gets one short line built from its own fields,
+// and the steps between allocation and the result get none. An event this doesn't know prints its message.
+function secsLabel(ms: number): string {
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 20_000 ? 1 : 0)} s`
+  const s = Math.round(ms / 1000)
+  return `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, '0')} s`
+}
+function terminalLine(ev: SlurmEvent & Record<string, any>): string | null {
+  const b: string = ev.backend || ''
+  const ms = ev.elapsed_ms, cost = ev.cost
+  if (ev.type === 'loading' || ev.type === 'inferring') return null
+  if (ev.type === 'sched_allocate' && ev.partition && ev.region) return `sched: ${ev.partition} node in ${ev.region}`
+  if (ev.type === 'allocate' && ev.zone) return `${b} → ${ev.zone}`
+  if (ev.type === 'done' && typeof ms === 'number' && typeof cost === 'number') return `${b} done · ${secsLabel(ms)} · $${cost.toFixed(4)}`
+  return ev.msg
+}
+
 
 export default function App() {
   const { config } = useConfig()
@@ -69,11 +96,14 @@ export default function App() {
   const isMd = phase === 'md1' || phase === 'md2' || phase === 'md3'
   const isPd1 = phase === 'pd1'  // pd1 stays zoomed on us-central1 with Hyperdisk hub
   const isTpu = phase === 'tpu1' || phase === 'tpu2' || phase === 'tpu3'
+  // The protein panel shows on the science slides and on the models3 ecosystem close.
   const isModels = phase === 'models1' || phase === 'models2' || phase === 'models3'
   const sideLadderHighlight: BackendId[] =
     phase === 'tpu2' ? ['af2-tpu', 'esmfold-tpu', 'boltz2-tpu'] :
     phase === 'tpu3' ? ['esmfold-tpu', 'esmfold-gpu'] :
     []
+  // The ladder's TPU-vs-GPU cost ratio waits for the TPU slides, where the talk makes that comparison (summit 20e5eb5).
+  const showCostRatio = SLIDE_ORDER.indexOf(phase) >= SLIDE_ORDER.indexOf('tpu1')
   const mapCenter = phase === 'home'
     ? config.home.cameraLatLng  // camera offset S+E of the home marker so the spinner sits above the terminal
     : isMd || isPd1
@@ -81,7 +111,7 @@ export default function App() {
       : isTpu
         ? { lat: 39.9623, lng: -83.0007 }  // us-east5 (Columbus, OH) — TPU east
         : { lat: 39.5, lng: -98.35 }
-  const mapZoom = phase === 'home' ? 12 : isMd || isPd1 || isTpu ? 6 : 5
+  const mapZoom = phase === 'home' ? (config.home.zoom ?? 12) : isMd || isPd1 || isTpu ? 6 : 5
   const mdLayer: 'storage' | 'compute' | 'topology' | null =
     phase === 'md1' ? 'storage' :
     phase === 'md2' ? 'compute' :
@@ -103,6 +133,8 @@ export default function App() {
   const pollBusy = useRef(false)
   const terminalRef = useRef<HTMLDivElement>(null)
   const terminalDone = useRef(false)
+  // True while this tab's own submit is in flight, so the follower doesn't take the same run twice.
+  const submitting = useRef(false)
 
   function consoleUrl(ev: { vm?: string | null, zone?: string, partition?: string, project?: string }): string {
     if (!ev.vm || !ev.zone || !ev.project) return ''
@@ -118,7 +150,6 @@ export default function App() {
     terminalDone.current = false
     sawRunActive.current = false
     pollBusy.current = false
-
     const drainNext = () => {
       if (lineQueue.current.length === 0) {
         dripRef.current = setTimeout(drainNext, 500) as any
@@ -126,12 +157,13 @@ export default function App() {
       }
       const ev = lineQueue.current.shift()! as any
 
-      // ── Terminal: show msg for all visible event types ──
+      // ── Terminal: one short line per event, or none ──
       if (!terminalDone.current && ev.type !== 'node_up') {
         if (ev.type === 'complete') {
           terminalDone.current = true
         } else {
-          setDispatchLines(prev => [...prev, showNodeNames(ev.msg)])
+          const line = terminalLine(ev)
+          if (line) setDispatchLines(prev => [...prev, showNodeNames(line)])
         }
       }
 
@@ -321,8 +353,73 @@ export default function App() {
     }
   }, [dispatchLines])
 
+  // A run started elsewhere: fast-science's launch on the Cloud Workstation POSTs the same /api/submit that
+  // Enter does. The page leaves home for running as if Enter had been pressed. `stale` holds the event names
+  // listed before the new manifest appeared, which are the last run's.
+  const followRun = useCallback((stale: string[], proteinId?: string) => {
+    seenEvents.current = new Set(stale)
+    const p = PROTEINS.find(x => x.id === proteinId)
+    if (p) setCurrentProtein(p)
+    setSubmitError(null)
+    setDispatchLines([])
+    setLanes(Object.fromEntries(BACKENDS.map(b => [b.id, initLaneStatus(b.id)])) as Record<BackendId, LaneStatus>)
+    setZoneStates({})
+    setVmStates({})
+    setPhase('running')
+    startPolling()
+  }, [startPolling])
+
+  // On home, watch job/manifest.json every 2 s. predict.sh writes a new submitted_at at the start of every run.
+  useEffect(() => {
+    if (phase !== 'home' || !FOLLOW) return
+    let baseline: string | null | undefined
+    let names: string[] = []
+    let busy = false
+    let stopped = false
+    const tick = async () => {
+      if (busy || stopped || submitting.current) return
+      busy = true
+      try {
+        const [list, m] = await Promise.all([listEventNames().catch(() => null), getManifest()])
+        if (stopped || submitting.current) return
+        const at = m?.submitted_at ?? null
+        if (baseline === undefined) baseline = at
+        else if (at && at !== baseline) {
+          stopped = true
+          followRun(names, m?.protein_id)
+          return
+        }
+        if (list) names = list
+      } catch (err) {
+        console.warn('Follow poll failed:', err)
+      } finally {
+        busy = false
+      }
+    }
+    tick()
+    const id = setInterval(tick, 2000)
+    return () => { stopped = true; clearInterval(id) }
+  }, [phase, followRun])
+
+  // Opened from fast-science's link: attach to the run in flight. Event objects are named
+  // job/log/<epoch ns>-<who>.json, so the ones from before this run's submitted_at are the last run's.
+  useEffect(() => {
+    if (!RUN_LINK) return
+    Promise.all([listEventNames().catch(() => [] as string[]), getManifest()]).then(([names, m]) => {
+      const at = m?.submitted_at
+      if (!at || at < RUN_LINK) return  // the run isn't written yet; the follower takes it when it is
+      const cutoff = BigInt(Date.parse(at)) * 1_000_000n
+      const stale = names.filter(n => {
+        const seq = n.slice(n.lastIndexOf('/') + 1).split('-')[0]
+        return seq.length > 0 && [...seq].every(c => c >= '0' && c <= '9') && BigInt(seq) < cutoff
+      })
+      followRun(stale, m?.protein_id)
+    }).catch(err => console.warn('Run link attach failed:', err))
+  }, [followRun])
+
   const handleSubmit = useCallback(async () => {
     setSubmitError(null)
+    submitting.current = true
     try {
       // Every event object already in the log belongs to an earlier run. Mark them seen before
       // submitting. Keyed on object names rather than timestamps, so a presenter laptop with a
@@ -347,19 +444,21 @@ export default function App() {
       console.error('Submit failed:', err)
       setSubmitError(`sbatch: error: submit failed (${err instanceof Error ? err.message : String(err)})`)
       setPhase('home')
+    } finally {
+      submitting.current = false
     }
   }, [currentProtein, startPolling])
 
-  // Enter + Arrow keys walk SLIDE_ORDER: home → run → catalog → … → pse
   React.useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (wizardOpen) return
       if (e.key === 'Enter' || e.key === 'ArrowRight') {
         e.preventDefault()
         if (phase === 'home') {
-          // If a run is already in flight (user navigated back here), just go forward without re-submitting
-          const hasActiveRun = Object.values(lanes).some(l => l.state !== 'idle' && l.state !== 'done' && l.state !== 'failed')
-          if (hasActiveRun) setPhase('running')
+          // Once this tab holds a run, in flight or finished, go back to it. Only a tab that never
+          // attached to a run submits, and the server attaches that submit to a run already in flight.
+          const hasRun = Object.values(lanes).some(l => l.state !== 'idle')
+          if (hasRun) setPhase('running')
           else handleSubmit()
         }
         else {
@@ -384,11 +483,12 @@ export default function App() {
   return (
     <div style={{ width: '100vw', height: '100vh', background: '#171717', overflow: 'hidden', position: 'relative' }}>
       {/* Fullscreen map — zoom driven by phase */}
-      <InfraMap lanes={lanes} zoneStates={zoneStates} vmStates={vmStates} onZoneClick={setSelectedZone} center={mapCenter} zoom={mapZoom} homePosition={config.home.markerLatLng} highlightUS={phase === 'catalog2' || phase === 'catalog3' || phase === 'catalog4'} showSpokes={phase === 'catalog2' || phase === 'catalog3' || phase === 'catalog4'} showHalos={phase === 'catalog3' || phase === 'catalog4'} mdLayer={mdLayer} showHyperdiskHub={showHyperdiskHub} showPartitionChips={showPartitionChips} showSliceViz={showSliceViz} />
+      <InfraMap lanes={lanes} zoneStates={zoneStates} vmStates={vmStates} onZoneClick={setSelectedZone} center={mapCenter} zoom={mapZoom} homePosition={config.home.markerLatLng} highlightUS={phase === 'catalog2' || phase === 'catalog3' || phase === 'catalog4'} showSpokes={phase === 'catalog2' || phase === 'catalog3' || phase === 'catalog4'} showHalos={phase === 'catalog3' || phase === 'catalog4'} mdLayer={mdLayer} showHyperdiskHub={showHyperdiskHub} showPartitionChips={showPartitionChips} showSliceViz={showSliceViz} showMemberSites={phase === 'home'} />
 
       {/* Top-right: TPU status badge */}
       <div style={{
-        position: 'fixed', bottom: 15, right: 15, zIndex: 25,
+        // On the models slides the protein column fills the right --results-w, so the badge moves left of it.
+        position: 'fixed', bottom: 15, right: isModels ? 'calc(var(--results-w) + 15px)' : 15, zIndex: 25,
         display: 'flex', alignItems: 'center', gap: 6,
         background: 'rgba(20,20,30,0.7)', backdropFilter: 'blur(8px)',
         border: `1px solid ${tpuStatus?.status === 'ready' ? 'rgba(110,180,63,0.3)' : 'rgba(248,152,29,0.3)'}`,
@@ -463,9 +563,16 @@ export default function App() {
         // Home: original small centered box (42vh top + 25vh tall → 33vh bottom).
         // Non-home: spans from below hamburger to just above location-paper (~12vw + buffer).
         top:    phase === 'home' ? '42vh' : '75px',
-        bottom: phase === 'home' ? '33vh' : 'calc(12vw + 12px)',
+        // Off home the box grows with its lines up to the location paper, so an empty black block doesn't cover
+        // the map in a split-view window.
+        bottom: phase === 'home' ? '33vh' : 'auto',
+        maxHeight: phase === 'home' ? undefined : 'calc(100vh - 75px - 12vw - 12px)',
+        // The models slides are about the results, and the open panel sits where the terminal would show through.
+        opacity: isModels ? 0 : 1,
+        pointerEvents: isModels ? 'none' : 'auto',
         // Tighter when anchored so more map is visible. Width animates in Phase 2.
-        width:  phase === 'home' ? '30vw' : '22vw',
+        // At least 200px, so lines wrap less in a split-view window.
+        width:  phase === 'home' ? '30vw' : 'clamp(200px, 22vw, 380px)',
         // Always anchored at left: 1vw. Centered on home via transform alone (no jiggle).
         // translateX(34vw) puts left edge at 35vw = (100-30)/2, centering the 30vw home box.
         left: '1vw',
@@ -475,7 +582,8 @@ export default function App() {
           'transform 0.35s cubic-bezier(0.4, 0, 0.2, 1),' +
           ' top 0.35s cubic-bezier(0.4, 0, 0.2, 1) 0.35s,' +
           ' bottom 0.35s cubic-bezier(0.4, 0, 0.2, 1) 0.35s,' +
-          ' width 0.35s cubic-bezier(0.4, 0, 0.2, 1) 0.35s',
+          ' width 0.35s cubic-bezier(0.4, 0, 0.2, 1) 0.35s,' +
+          ' opacity 0.3s ease',
         zIndex: 20,
       }}>
         <div style={{ color: '#708090', fontSize: '1vmin' }}>Last login: {new Date().toLocaleString()} on tty1</div>
@@ -486,7 +594,9 @@ export default function App() {
           <div className="terminal-line" style={{ marginTop: 6, color: '#EF4035' }}>{submitError}</div>
         )}
         {phase === 'home' && (
-          <div style={{ marginTop: 6, color: '#708090', fontSize: '1.1vmin' }}>{submitError ? 'Press Enter to retry' : 'Press Enter to submit'}</div>
+          <div style={{ marginTop: 6, color: '#708090', fontSize: '1.1vmin' }}>
+            {submitError ? 'Press Enter to retry' : FOLLOW ? 'Waiting for a run from the workstation · Enter submits from here' : 'Press Enter to submit'}
+          </div>
         )}
         {phase !== 'home' && dispatchLines.length > 0 && (
           <>
@@ -499,7 +609,7 @@ export default function App() {
       </div>
 
       {/* Side ladder — always visible, fills with values as backends complete */}
-      <SideLadder lanes={lanes} onSelect={() => {}} highlightBackends={sideLadderHighlight} />
+      <SideLadder lanes={lanes} onSelect={() => {}} highlightBackends={sideLadderHighlight} showCostRatio={showCostRatio} />
       <ProteinViewer visible={isModels} />
 
       {/* Location paper — key only changes on home↔cloud transitions, so the protein "comes in"
@@ -512,9 +622,10 @@ export default function App() {
           {phase === 'home' ? config.home.buildingName : currentProtein.name.toUpperCase()}
         </div>
         <div className="location-paper-coords" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span>{phase === 'home'
-            ? `Lat: ${config.home.markerLatLng.lat}, Lng: ${config.home.markerLatLng.lng}`
-            : `${currentProtein.uniprotId} · ${currentProtein.residueCount} AA`}</span>
+          {phase === 'home'
+            ? <span>{`Lat: ${config.home.markerLatLng.lat}, Lng: ${config.home.markerLatLng.lng}`}</span>
+            // During the run: what the protein does, in plain words, under its name.
+            : <span className="location-paper-desc">{currentProtein.description.replace(' — ', ' · ')}</span>}
           <SetupWizard visible={phase === 'home'} onOpenChange={setWizardOpen} />
         </div>
       </div>
@@ -526,85 +637,69 @@ export default function App() {
         open={infoOpen}
         onToggle={() => setInfoOpen(!infoOpen)}
         title={
-          phase === 'home' ? 'AI Infrastructure Initiative' :
+          phase === 'home' ? 'Research Computing at {institution}' :
           phase === 'dispatching' ? 'Multi-Region Burst' :
           phase === 'running' ? 'Multi-Region Burst' :
-          phase === 'catalog' ? 'Research Applications Catalog' :
-          phase === 'catalog2' ? 'Data-Anchored Burst: Storage' :
-          phase === 'catalog3' ? 'Data-Anchored Burst: Caching' :
-          phase === 'catalog4' ? 'Data-Anchored Burst: vs AWS & Azure' :
-          phase === 'md1' ? 'Tightly-Coupled Simulation' :
-          phase === 'md2' ? 'H4D + Cloud RDMA (Falcon)' :
-          phase === 'md3' ? 'Five MPI-Specific Google Features' :
+          phase === 'catalog' ? '{institution}\'s Workloads, Three Shapes' :
           phase === 'pd1' ? 'Independent GPU Jobs' :
           phase === 'pd2' ? 'Consumption Models' :
           phase === 'img' ? 'Independent GPU Jobs: Fractional & Serverless' :
+          phase === 'catalog2' ? 'Data-Anchored Burst: Storage' :
+          phase === 'catalog4' ? 'Data-Anchored Burst: vs AWS & Azure' :
+          phase === 'md1' ? 'Tightly-Coupled Simulation' :
+          phase === 'md2' ? 'H4D + Cloud RDMA (Falcon)' :
+          phase === 'md3' ? 'Long Jobs Route Around Failures' :
           phase === 'tpu1' ? 'TPUs' :
           phase === 'tpu2' ? 'Why TPU Economics Are Structural' :
-          phase === 'tpu3' ? 'TorchTPU: ESMFold in 4 Lines' :
+          phase === 'tpu3' ? 'One PyTorch File, Both Chips' :
           phase === 'models1' ? 'AI Models Only Google Has' :
-          phase === 'models2' ? 'Google Science Bench' :
-          phase === 'models3' ? 'Ecosystem Partnerships' :
-          phase === 'pse' ? 'Public Sector Economics' :
           'Results'
         }
         sections={
           phase === 'home' ? [
-            { body: 'Your institution is evaluating how to extend on-prem HPC into the cloud. Research compute today is typically spread across several independent estates — separate GPU clusters, bioinformatics farms, and shared consortium allocations queued on the newest accelerators. The goal is extending that foundation elastically into the cloud without forcing researchers to change how they work.\n\nGoogle designs its own silicon, network transport, and datacenter hardware — attributes that make cloud bursting with Google worth a closer look.\n\nOn screen is a terminal on an on-prem login node with a Slurm command: <code>sbatch predict.sh --model=all --target=both --protein=brca1 --requeue --partition=tpu,gpu</code>. When we press Enter, six inference jobs will dispatch across both TPU and GPU partitions to whichever cloud CONUS regions have capacity.' },
+            { body: '{intro}\n\nGoogle designs its own silicon, network transport, and datacenter hardware — attributes that make cloud bursting with Google [worth a closer look](https://www.gartner.com/doc/reprints?id=1-2NMT0142&ct=260630&st=sb). [Gartner estimates](https://www.gartner.com/doc/reprints?id=1-2NMT0142&ct=260630&st=sb) Google holds about a quarter of the world\'s cumulative AI compute capacity.\n\nOn screen is a {institution} [login node]({controllerConsoleHref}) with the command `sbatch predict.sh --model=all --target=both --protein=brca1 --requeue --partition=tpu,gpu`. When we press Enter, six inference jobs fan out from that login node to whichever Google Cloud regions have capacity.' },
           ] :
           phase === 'dispatching' || phase === 'running' ? [
-            { body: 'A <a href="https://cloud.google.com/network-connectivity/docs/interconnect/concepts/overview" target="_blank">400 Gbps Dedicated Interconnect</a> is possible to the nearest Google edge, with private IP connectivity, sub-millisecond latency, MACsec encrypted in transit. <a href="https://cloud.google.com/managed-microsoft-ad/docs/overview" target="_blank">Managed Microsoft AD</a> can bridge on-prem UID/GID into the cloud nodes so researchers log in with the same identity they use today.\n\nThis environment shows an operating model of <b>one Slurm, one identity, one <code>/data/</code></b> — researchers submit <code>sbatch</code> the same way they do today; Managed AD bridges their UID/GID; Cloud Storage FUSE mounts the same paths. Many on-prem clusters already run this pattern — owner partitions plus Slurm preemption let researchers burst onto idle shared nodes — and we extend that same burst surface to GCP.\n\nSlurm\'s <code>--requeue</code> flag handles Spot preemption: if a node is reclaimed, the job retries in the next available zone. Researchers see none of this — they submit <code>sbatch</code> and Slurm handles the rest.' },
+            { body: '[Managed Microsoft AD](https://cloud.google.com/managed-microsoft-ad/docs/overview) can bridge on-prem [UID/GID](https://docs.cloud.google.com/filestore/docs/configure-nfsv4-managed-ad) into the cloud nodes so researchers log in with the same identity they use today.\n\n\nThis environment shows an operating model of **one Slurm, one identity, one `/data/`**. {institution} researchers keep typing `sbatch` on `{loginNode}`, the cloud partitions sit behind the same scheduler, and Slurm\'s `--requeue` retries a preempted job in the next zone with capacity.\n\nBy the way, these data centers carry Google Cloud\'s [FedRAMP High authorization](https://cloud.google.com/security/compliance/fedramp), so there\'s no separate GovCloud, and HIPAA work runs under Google\'s [BAA](https://cloud.google.com/security/compliance/hipaa).' },
           ] :
           phase === 'catalog' ? [
-            { body: 'A typical research-computing estate runs hundreds to thousands of distinct software titles across multiple clusters. We organize them into three workload shapes, ordered from quickest cloud win to deepest HPC:\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Independent GPU Jobs</b></li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Data-Anchored Burst</b></li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Tightly-Coupled Simulation</b></li></ul>' },
-          ] :
-          phase === 'catalog2' ? [
-            { body: 'Input datasets are large — hundreds of GB per session — but static per experiment, making this an ideal burst profile. The compute is often single-GPU per task. the prework is incrementally syncing predetermined parts of the shared filesystem using <a href="https://cloud.google.com/storage-transfer/docs/overview" target="_blank">Storage Transfer Service</a>.\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Synchrotron beamline data</b> (SAXS, crystallography) — each beamtime is a write-heavy burst of detector images followed by read-intensive reduction, generating hundreds of TB per run where detector brightness is outrunning local compute.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Cryo-EM movie datasets</b> (CryoSPARC, RELION, Phenix) — multi-terabyte, write-once read-many. Written once, then read repeatedly through motion-correction and 3D classification.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Genomic sequencing archives</b> — decades of immutable data reprocessed in batch through aligners and downstream callers.</li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>High-energy physics or quantum-matter imaging datasets</b> — terabyte-scale, same write-once, read-many profile.</li></ul>\nCompute nodes in every burst region mount the same <code>/data/</code> paths from this one multi-region bucket via <a href="https://cloud.google.com/storage/docs/cloud-storage-fuse/overview" target="_blank">Cloud Storage FUSE</a> — one shared namespace everywhere, read anywhere and write results back.' },
-          ] :
-          phase === 'catalog3' ? [
-            { body: '<a href="https://docs.cloud.google.com/storage/docs/rapid/rapid-cache" target="_blank">Rapid Cache</a> puts an SSD-backed zonal cache in each burst region in front of the multi-region bucket at <b>2.5 TB/s, sub-millisecond latency</b> — repeated reads are served locally, so you don\'t re-pay cross-region transfer on cache hits.\n\n<a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/image-streaming" target="_blank">Image Streaming</a> has a workload starting in seconds even on 60GB containers.' },
-          ] :
-          phase === 'catalog4' ? [
-            { body: '<b>AWS S3</b> has no multi-region buckets. <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/MultiRegionAccessPoints.html" target="_blank">Multi-Region Access Points</a> route requests intelligently, but each object still lives in a single region, so cross-region egress both accrue on every cache miss. <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/mountpoint.html" target="_blank">Mountpoint for S3</a> reached general availability in 2023, giving it years less production exposure than <a href="https://cloud.google.com/storage/docs/cloud-storage-fuse/overview" target="_blank">Cloud Storage FUSE</a>, and there is no S3 equivalent to <a href="https://docs.cloud.google.com/storage/docs/rapid/rapid-cache" target="_blank">Rapid Cache</a> at any tier.\n\n<b>Azure Blob Storage</b> is region-pinned with no multi-region bucket equivalent in its catalog, and Azure caps useful <a href="https://learn.microsoft.com/en-us/azure/aks/artifact-streaming" target="_blank">image streaming</a> around 30 GB — half the headroom Google ships.' },
-          ] :
-          phase === 'md1' ? [
-            { body: 'Tightly-coupled MPI simulation — molecular dynamics, computational fluid dynamics, and finite-element multiphysics. Multi-node, latency-sensitive, anchored in one region.\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Molecular dynamics</b> (replica-exchange, free-energy perturbation) — many tightly-coupled ranks exchanging state, the canonical communication-bound HPC pattern.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Finite-element multiphysics</b> (COMSOL, structural mechanics) — coupled-physics models of microscale actuators and biological-tissue mechanics.</li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Computational fluid dynamics</b> — both classical MPI and ML-native differentiable solvers in <a href="https://jax.readthedocs.io/" target="_blank">JAX</a>, Google\'s own framework, embedding PDE operators directly into neural nets as the complement to classical MPI fluid dynamics.</li></ul>\nThe hot scratch tier is zonal. Two options serve this profile: <a href="https://docs.cloud.google.com/managed-lustre/docs/overview" target="_blank">Managed Lustre</a> with full POSIX, sub-millisecond latency at <b>10 TB/s</b> (AWS FSx for Lustre caps around 2 TB/s) or <a href="https://docs.cloud.google.com/storage/docs/rapid/rapid-bucket" target="_blank">Rapid Bucket</a> with <b>15 TB/s, 20 million QPS</b> suited to streaming checkpoints.\n\nHierarchical namespaces in buckets allow elegant folder renames — a finished job commits with an atomic, metadata-only rename: <code>gcloud storage mv gs://your-institution/Refine3D/job001.staging gs://your-institution/Refine3D/job001</code> updates the path without copying or deleting the underlying files, where AWS can only rename one object at a time, not whole directories.' },
-          ] :
-          phase === 'md2' ? [
-            { body: '<a href="https://cloud.google.com/blog/products/compute/new-h4d-vms-optimized-for-hpc" target="_blank">H4D</a> is the HPC-optimized VM, purpose-built for tightly-coupled MPI. Hardware: <b>5th-gen AMD EPYC Turin, 192 vCPUs, up to 1.5 TB RAM, 200 Gbps</b> <a href="https://docs.cloud.google.com/compute/docs/instances/create-vm-with-rdma" target="_blank">Cloud RDMA</a> via <a href="https://cloud.google.com/blog/topics/systems/introducing-falcon-a-reliable-low-latency-hardware-transport" target="_blank">Falcon</a> — higher RAM and newer CPU generation than competitors. Published benchmarks: <a href="https://cloud.google.com/blog/products/compute/new-h4d-vms-optimized-for-hpc" target="_blank">GROMACS Lignocellulose</a> at <b>2.8× over TCP</b> on 32 VMs with Falcon; Ansys Fluent <b>4.1× vs C2D</b>; OpenFOAM <b>5.2× vs C2D with 122% superlinear efficiency</b>.' },
-          ] :
-          phase === 'md3' ? [
-            { body: 'Tightly-coupled simulation highlights these unique Google features:\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://docs.cloud.google.com/cluster-director/docs/orchestration" target="_blank"><b>Topology-aware Slurm via Cluster Director</b></a> — <a href="https://docs.cloud.google.com/ai-hypercomputer/docs/networking-overview" target="_blank">AWS and Azure do not expose the hierarchy to the scheduler — placement is random</a>, vs. Cluster Director can colocate on the same rack.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/machine-learning/training/multi-tier-checkpointing" target="_blank">Multi-Tier Checkpointing</a> — writes to local RAM disk, replicates to peer nodes, async-uploads to Cloud Storage. When a long-running job restarts, it pulls from the nearest tier: local SSD first, peer node next, GCS last.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/enable-node-health-prediction" target="_blank">Node Health Prediction</a> — predicts which nodes will degrade in the next 5 hours based on metadata, heat, and packet integrity, and drains them before disruptive symptoms surface. AWS SageMaker notifies after the fact.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://cloud.google.com/blog/products/networking/introducing-virgo-megascale-data-center-fabric" target="_blank">Optical Circuit Switching (Palomar)</a> — when a chip fails mid-job, OCS physically reroutes the topology around the failed chip without restarting. Anthropic uses this to survive daily failures across 1 million chips.</li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://cloud.google.com/blog/products/ai-machine-learning/goodput-metric-as-measure-of-ml-productivity" target="_blank">Goodput</a> — paid compute hours that were actually productive. Google publishes this as a service-level indicator, and Cluster Director optimizes for it.</li></ul>' },
+            { body: '{institution}\'s research computing fits three workload shapes, from quickest cloud win to deepest HPC:\n\n- **Independent GPU Jobs**{catalog:pd}\n- **Data-Anchored Burst**{catalog:db}\n- **Tightly-Coupled Simulation**{catalog:md}' },
           ] :
           phase === 'pd1' ? [
-            { body: 'Single-node, single-GPU jobs that fan out embarrassingly parallel — each job runs independently, inputs are small (KB–MB), compute is large. The live demo runs this shape: AlphaFold, ESMFold, and Boltz-2 each on a single GPU or TPU.\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Protein structure prediction</b> (AlphaFold2, ZDOCK, molecular docking) — per-interaction deep learning that fans out cleanly onto single-GPU nodes.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Single-cell and epigenomic pipelines</b> (Hi-C, ChIP-seq, ATAC-seq) — each sample is its own batch job, the same per-sample fan-out.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>ML model training and hyperparameter sweeps</b> — independent trials that scale out across nodes instead of queueing on a shared consortium allocation.</li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Medical imaging AI</b> (pathology, radiology, MRI) — slide-, scan-, and volume-level inference that lands on GCP in minutes rather than waiting on shared H100s.</li></ul>\nModel weights are served from <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/hyperdisk-ml" target="_blank">Hyperdisk ML</a>. <b>One volume serves 2,500 instances at 1.2 TiB/s aggregate</b>. An admin creates the volume and loads weights once; researchers\' job scripts just read a local path.\n\nOne layer up at the host, <a href="https://cloud.google.com/kubernetes-engine/docs/concepts/fast-starting-nodes" target="_blank">BoltVMs</a> are pre-initialized GPU nodes that keep the boot, driver, and container runtime warm — <b>H100 cold-start drops from 15 minutes to 2</b>.\n\nAnd at the workload layer, <a href="https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots" target="_blank">Pod Snapshots</a> snapshot full pod state and restore in seconds — <b>80% faster warm restart for a 70B-parameter model</b>. Standard K8s pod restart in AWS EKS or AKS reloads model weights from scratch.' },
+            { body: 'Single-node, single-accelerator jobs that fan out embarrassingly parallel. The live demo runs this shape: AlphaFold, ESMFold, and Boltz-2 each on a single GPU or TPU.\n\n{examples:pd1}\n\nTo scale inference, an admin can preload model weights onto [Hyperdisk ML](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/hyperdisk-ml) once. **One volume serves 2,500 instances at 1.2 TiB/s aggregate**, and loads weights up to 11.9× faster than a model registry.\n\nOne layer up at the host, [BoltVMs](https://cloud.google.com/kubernetes-engine/docs/concepts/fast-starting-nodes) are pre-initialized GPU nodes that keep the boot, driver, and container runtime warm — **GPU cold-start drops from 15 minutes to 2**.\n\nAnd at the workload layer, [Pod Snapshots](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-snapshots) restore full pod state in seconds — **89% faster startup for a 70B-parameter model**. Compare with EKS or AKS where pod restart loads model weights from scratch.\n\nOne [GKE](https://cloud.google.com/blog/products/containers-kubernetes/whats-new-in-gke-at-next26) control plane manages **256,000 nodes**. AWS [announced EKS at 100,000 nodes](https://aws.amazon.com/about-aws/whats-new/2025/07/amazon-eks-100000-worker-nodes-per-cluster/) in July 2025.' },
           ] :
           phase === 'pd2' ? [
-            { body: 'The background sbatch demo follows the Independent GPU Jobs pattern, dispatching across consumption models:\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://cloud.google.com/compute/docs/instances/committed-use-discounts-overview" target="_blank">3-Year CUD + Zonal Reservation</a> — Lowest cost tier — competitive with on-prem $/GPU-hr. Locks in pricing for the full term; the reservation guarantees the hardware is there.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/dws" target="_blank">DWS Flex Start</a> — <b>guaranteed GPU or TPU capacity for up to 7 days per request</b>, with no reservation contract or minimum commitment. AWS Capacity Blocks require fixed-duration commitment and rigid sizing. AWS also <a href="https://www.theregister.com/off-prem/2026/01/05/aws-raises-gpu-prices-15-on-a-saturday/2652706" target="_blank">raised H200 prices 15%</a> recently.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://docs.cloud.google.com/compute/docs/instances/future-reservations-calendar-mode-overview" target="_blank">Calendar Mode</a> — pick a start date and lock in guaranteed capacity for <b>up to 90 days</b>. Useful for runs planned against grant milestones.</li></ul>\nGoogle\'s <a href="https://cloud.google.com/blog/products/containers-kubernetes/whats-new-in-gke-at-next26" target="_blank">GKE hypercluster</a> <b>manages 1 million chips across 256,000 nodes spanning multiple regions under a single control plane</b>. AWS announced EKS at 100,000 nodes in July 2025.\n\n<a href="https://docs.cloud.google.com/kubernetes-engine/docs/concepts/about-compute-classes" target="_blank">Custom Compute Classes</a> act as the routing policy engine across all three workload shapes — Independent GPU Jobs fan across TPU+GPU, Data-Anchored Burst stages from the shared multi-region bucket, and Tightly-Coupled Simulation heads to compute-optimized HPC VMs with RDMA — without the researcher choosing the backend.' },
+            { body: 'Three ways to pay:\n\n- **Spot**: the live run tries Spot nodes first. Slurm moves jobs from low-resource zones to a standard partition.\n- [**DWS Flex Start**](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/dws): **guaranteed GPU or TPU capacity for up to 7 days per request**, with no reservation contract or minimum commitment. AWS Capacity Blocks require fixed-duration commitment and rigid sizing. AWS also [raised H200 prices 15%](https://www.theregister.com/off-prem/2026/01/05/aws-raises-gpu-prices-15-on-a-saturday/2652706) recently.\n- [**Calendar Mode**](https://docs.cloud.google.com/compute/docs/instances/future-reservations-calendar-mode-overview): pick a start date and lock in guaranteed capacity for **up to 90 days**, for runs planned against grant milestones.\n\n{examples:pd2}' },
           ] :
           phase === 'img' ? [
-            { body: 'Not every model needs a full H100. <a href="https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines#g4-series" target="_blank">G4 fractional GPUs</a> carve up an NVIDIA RTX PRO 6000 Blackwell into <b>1/8, 1/4, or 1/2 slices via vGPU</b>. AWS G5g ships whole L4 instances only — no native fractional split. Azure NCv supports MIG but does not offer vGPU sub-VM shapes.\n\nFor clinical inference — radiology endpoints, real-time microscopy — <a href="https://cloud.google.com/run/docs/configuring/services/gpu" target="_blank">serverless Cloud Run with GPUs</a> serves the fine-tuned model as a managed endpoint. <b>L4 (24 GB) or RTX PRO 6000 Blackwell (96 GB), 5-second cold start, scale-to-zero, per-second billing</b>. AWS Lambda has no GPU support. AWS App Runner has no GPU support. <a href="https://learn.microsoft.com/en-us/azure/container-apps/gpu-serverless-overview" target="_blank">Azure Container Apps Serverless GPU</a> caps at A100 80 GB.\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Digital humanities NLP and topic modeling</b> — large text corpora processed as L4-class fractional inference.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Point-of-care clinical diagnostics</b> — scale-to-zero L4 endpoints on Cloud Run that idle to nothing between requests.</li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Real-time microscopy image reconstruction</b> — high-frame-rate acquisition with GPU-accelerated reconstruction, served as a managed endpoint on Cloud Run.</li></ul>' },
+            { body: 'Not every model needs a full GPU node. [Fractional GPUs](https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines#g4-series) carve up an NVIDIA RTX PRO 6000 Blackwell into **1/8, 1/4, or 1/2 slices via vGPU**. A whole one holds 96 GB.\n\nFor live inference, [serverless Cloud Run with GPUs](https://cloud.google.com/run/docs/configuring/services/gpu) can serve GPUs as a managed endpoint. **RTX PRO 6000 Blackwell (96 GB), 5-second cold start, scale-to-zero, per-second billing**. AWS Lambda has no GPU support. AWS App Runner has no GPU support. [Azure Container Apps Serverless GPU](https://learn.microsoft.com/en-us/azure/container-apps/gpu-serverless-overview) caps at A100 80 GB.\n\n{examples:img}' },
+          ] :
+          phase === 'catalog2' ? [
+            { body: 'Input datasets are large — hundreds of GB per session — but static per experiment, making this workload shape ideal for cloud bursting too. The prework incrementally syncs the cluster\'s shared filesystem, using [Storage Transfer Service](https://cloud.google.com/storage-transfer/docs/overview).\n\nCompute nodes in every burst region mount the same `/data/` paths from one multi-region bucket via [Cloud Storage FUSE](https://cloud.google.com/storage/docs/cloud-storage-fuse/overview) — one shared namespace everywhere, read anywhere and write results back.\n\n{examples:catalog2}' },
+          ] :
+          phase === 'catalog4' ? [
+            { body: '[Rapid Cache](https://docs.cloud.google.com/storage/docs/rapid/rapid-cache) puts an SSD-backed zonal cache in each burst region in front of the multi-region bucket at **2.5 TB/s, [sub-millisecond latency](https://discuss.google.dev/t/how-to-build-an-elastic-scalable-llm-inference-platform-on-gke-using-fluid-compute/388108)**. Mountpoint for Amazon S3\'s shared cache holds only [objects up to 1 MB](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mountpoint-usage.html).\n\n**AWS S3** and **Azure Blob** have no multi-region buckets. S3 stitches one bucket per region together with replication that [lags by minutes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication-troubleshoot.html). Azure\'s [paired-region copy](https://learn.microsoft.com/en-us/azure/storage/common/storage-redundancy) takes no writes until a failover. A Google [multi-region bucket](https://docs.cloud.google.com/storage/docs/locations) is one bucket, and a read after a write [is never stale](https://docs.cloud.google.com/storage/docs/consistency).' },
+          ] :
+          phase === 'md1' ? [
+            { body: 'Tightly-coupled MPI simulation — molecular dynamics, CFD, and finite-element multiphysics. Multi-node, latency-sensitive, anchored in one region.\n\n{examples:md1}\n\nTwo storage options serve this shape: [Managed Lustre](https://docs.cloud.google.com/managed-lustre/docs/overview) with full POSIX, sub-millisecond latency at **10 TB/s** (AWS FSx for Lustre caps around 2 TB/s), or [Rapid Bucket](https://docs.cloud.google.com/storage/docs/rapid/rapid-bucket), with **15 TB/s, 20 million QPS** suited to streaming checkpoints.\n\nHierarchical namespaces in buckets allow elegant folder renames — a finished job commits with an atomic, metadata-only rename: `gcloud storage mv {bucket}/namd/run042.staging {bucket}/namd/run042` updates the path without copying or deleting the underlying files, where AWS can only rename one object at a time, not whole directories.' },
+          ] :
+          phase === 'md2' ? [
+            { body: '[H4D](https://cloud.google.com/blog/products/compute/new-h4d-vms-optimized-for-hpc) is the HPC-optimized VM, purpose-built for tightly-coupled MPI:\n\n- **192 physical cores**, SMT off, no overcommit, one VM per host ([H4D](https://docs.cloud.google.com/compute/docs/compute-optimized-machines#h4d_series)); `h4d-standard-192` has 720 GB and `h4d-highmem-192` has 1,488 GB\n- 5th-gen AMD EPYC Turin (EPYC 9B45): 2.7 GHz base, 3.5 GHz effective, 4.1 GHz max boost ([CPU platforms](https://docs.cloud.google.com/compute/docs/cpu-platforms))\n- **200 Gb/s [Cloud RDMA](https://docs.cloud.google.com/compute/docs/instances/create-vm-with-rdma)** over Google\'s [Falcon](https://cloud.google.com/blog/topics/systems/introducing-falcon-a-reliable-low-latency-hardware-transport) transport, with Intel MPI and Open MPI ([MPI guide](https://docs.cloud.google.com/cluster-toolkit/docs/setup/configure-mpi-application))\n\nNo HPC VM on [AWS](https://docs.aws.amazon.com/ec2/latest/instancetypes/hpc.html) or [Azure](https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/high-performance-compute/hx-series) pairs AMD\'s newest EPYC with more than 1 TB of memory.\n\nPublished results from the [H4D GA announcement](https://cloud.google.com/blog/products/compute/h4d-vms-now-ga): OpenFOAM Motorbike_100M **5.2× over C2D at 16 VMs with 122% efficiency** and Ansys Fluent F1_RaceCar_140M **4.1× at 32 VMs**. RDMA alone is worth **3.4× over TCP** on OpenFOAM at 4 VMs and **2.8×** on GROMACS at 32 VMs.' },
+          ] :
+          phase === 'md3' ? [
+            { body: 'Tightly-coupled simulation highlights these unique Google features:\n\n- [**Cluster Director**](https://docs.cloud.google.com/cluster-director/docs/orchestration) — topology-aware Slurm that places the ranks of one job on the same rack.\n- [**Node Health Prediction**](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/enable-node-health-prediction) flags GPU nodes likely to degrade within the next five hours, so new work skips them. [AWS HyperPod](https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-hyperpod-resiliency-slurm.html) replaces a node only after its health checks fail.\n- **Optical circuit switches** [rewire a TPU pod around a dead chip in seconds](https://newsletter.semianalysis.com/p/tpu-inferencex-full-steam).\n- [**Goodput**](https://cloud.google.com/blog/products/ai-machine-learning/goodput-metric-as-measure-of-ml-productivity) — paid compute hours that were actually productive. Google [publishes this as a service-level indicator](https://docs.cloud.google.com/ai-hypercomputer/docs/monitor), and Cluster Director optimizes for it.' },
           ] :
           phase === 'tpu1' ? [
-            { body: 'Five organizations that evaluated NVIDIA and TPU at scale and chose TPU for their most demanding workloads:\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://www.anthropic.com/news/expanding-our-use-of-google-cloud-tpus-and-services" target="_blank">Anthropic</a> — <b>up to 1 million TPU chips for Claude</b>. The largest AI infrastructure commitment in the industry.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://www.networkworld.com/article/4015386/openai-tests-google-tpus-amid-rising-inference-cost-concerns.html" target="_blank">OpenAI</a> — production ChatGPT inference on TPU. Industry analysts put the savings at <b>20–40% cheaper than equivalent GPU inference</b>. Multi-year commitment, deepened with Ironwood (TPU v7) capacity.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://machinelearning.apple.com/research/introducing-apple-foundation-models" target="_blank">Apple</a> — trained Apple Foundation Models on <b>8,192 TPUv4 chips with 52% sustained MFU</b>.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://siliconangle.com/2026/02/26/google-meta-reportedly-strike-new-multibillion-dollar-ai-chip-deal/" target="_blank">Meta</a> — <b>multi-billion-dollar TPU lease in February 2026</b> for Llama training. Meta operates the largest single NVIDIA cluster in the industry (100,000+ H100s); they are diversifying, not switching, because TPU economics on inference and ranking workloads beat the GPU stack they already operate.</li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://cloud.google.com/customers/recursion" target="_blank">Recursion Pharmaceuticals</a> — drug discovery on TPU at scale.</li></ul>\nGoogle reports approximately <a href="https://cloud.google.com/ai-infrastructure" target="_blank">90% of generative AI unicorns</a> run on Google Cloud AI infrastructure.' },
+            { body: '[90% of generative AI unicorns](https://cloud.google.com/blog/topics/google-cloud-next/welcome-to-google-cloud-next24) run on Google Cloud AI infrastructure. Google builds that stack end to end, from its own hardware up to its models, and offers frontier silicon on both paths, TPU and NVIDIA. [Gartner](https://www.gartner.com/doc/reprints?id=1-2NMT0142&ct=260630&st=sb) positions Google\'s TPUs as reducing *"the dependency on the clogged supply chain of NVIDIA."* Five organizations that run AI on TPU:\n\n- [Anthropic](https://www.anthropic.com/news/expanding-our-use-of-google-cloud-tpus-and-services) — **up to 1 million TPU chips for Claude**. In April 2026 it [added multiple gigawatts](https://www.anthropic.com/news/google-broadcom-partnership-compute) of next-generation TPUs starting in 2027.\n- [OpenAI](https://www.networkworld.com/article/4015386/openai-tests-google-tpus-amid-rising-inference-cost-concerns.html) — began testing Google\'s TPUs in 2025, and [plans to buy them](https://www.techtarget.com/news/openais-reported-google-tpu-deal-tests-ai-chip-economics/873139/), The Information reported in October 2026. Inference consumes over 50% of OpenAI\'s compute budget, and TPUs, specifically older ones, offer **significantly lower cost-per-inference** than NVIDIA GPUs, Forrester\'s Charlie Dai told Network World.\n- [Apple](https://arxiv.org/abs/2407.21075) — trained Apple Foundation Models on **8,192 TPUv4 chips with 52% sustained MFU**.\n- [Meta](https://siliconangle.com/2026/02/26/google-meta-reportedly-strike-new-multibillion-dollar-ai-chip-deal/) — **multi-billion-dollar TPU lease in February 2026** to train and run its next-generation models.\n- [Recursion Pharmaceuticals](https://cloud.google.com/customers/recursion) — drug discovery on TPU at scale.\n\nFor the protein models in this demo, TPUs are a second silicon path beside GPUs.' },
           ] :
           phase === 'tpu2' ? [
-            { body: 'TPU TCO per hour is <b>30% lower than NVIDIA GB200 and 41% lower than GB300</b>, per <a href="https://newsletter.semianalysis.com/p/tpuv7-google-takes-a-swing-at-the" target="_blank">SemiAnalysis</a>. Realized model FLOPS utilization is <b>40% on TPU versus 30% on GPU — 52% lower cost per effective petaFLOP</b> (Anthropic\'s <a href="https://www.anthropic.com/news/claude-opus-4-5" target="_blank">67% price cut on Claude Opus 4.5</a> is a direct consequence of running on TPU).\n\nPower matters too. A TPU v7 rack draws <b>70 kW versus 120 kW for an NVIDIA GB200 NVL72 rack</b> — 42% less power per rack. Institutions tracking sustainable computing increasingly treat per-petaFLOP power as a line item.' },
+            { body: 'TPU TCO per hour can be **up to 30% lower than NVIDIA GB200 and 41% lower than GB300**, per [SemiAnalysis](https://newsletter.semianalysis.com/p/tpuv7-google-takes-a-swing-at-the).\n\nSemiAnalysis\'s [AgentX](https://newsletter.semianalysis.com/p/tpu-strikes-the-king) benchmark measures agentic inference per dollar:\n\n- **GLM-5.2 at FP8:** TPUv7 is the cheapest FP8 option, with **1.2× to 2.7× the tokens per dollar** of B200, B300, and MI355X from 60 to 300 tok/s/user.\n- **Qwen3.5 397B:** TPUv7 at FP8 is **1.67× better perf per dollar** than even FP4 GB300 NVL72.\n- **Kimi K3 with MXFP4 weights:** TPUv7 delivers **1.15× to 2.5× the tokens per dollar** of GB200, B200, B300, and MI355X.\n\nOn single-turn [InferenceX](https://newsletter.semianalysis.com/p/tpu-inferencex-full-steam) runs, TPUv7 Ironwood delivered **up to 50% better performance per dollar** than B200 and B300, FP8 against FP8 on Qwen3.5 397B.\n\nAt Spot pricing, [Escalante](https://cloud.google.com/blog/topics/customers/escalante-uses-jax-on-tpus-for-ai-driven-protein-design) got **3.65× the performance per dollar** from Cloud TPU v6e over an H100 for its large-scale protein design jobs.\n\nThe lanes in this demo price each fold at one accelerator\'s on-demand rate.\n\nPower matters too. A TPU v7 rack draws **70 kW versus 120 kW for an NVIDIA GB200 NVL72 rack** — 42% less power per rack.' },
           ] :
           phase === 'tpu3' ? [
-            { body: 'Researchers are familiar with PyTorch. Historically TPU required JAX. <a href="https://developers.googleblog.com/torchtpu-running-pytorch-natively-on-tpus-at-google-scale/" target="_blank">TorchTPU</a> eliminates that requirement by running PyTorch natively on TPU.\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>RLHF training pipelines</b> (DeepSpeed, vLLM, FlashAttention-2) — the multi-GPU PyTorch stack TorchTPU targets, running on Llama-class models without a JAX rewrite.</li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Gaussian process libraries and Bayesian ML research</b> — PyTorch-native code (for example GPyTorch) that runs on TPU without rewriting.</li></ul>\nESMFold demonstrates the minimal case. The diff between the <a href="https://github.com/WandLZhang/ai-infra-demo-proteins/blob/main/backends/esmfold-gpu/predict.py" target="_blank">GPU backend</a> and the <a href="https://github.com/WandLZhang/ai-infra-demo-proteins/blob/main/backends/esmfold-tpu/predict.py" target="_blank">TPU backend</a> on the inference path is <b>four lines</b>:<pre style="background: #0a0a0a; border: 1px solid #2a2a2a; padding: 12px; margin: 10px 0; overflow-x: auto; font-size: 11px; line-height: 1.45; color: #eee;"><code>import torch\n<span style="color: var(--accent-term);">import torch_xla                              # NEW</span>\n<span style="color: var(--accent-term);">torch_xla.experimental.eager_mode(True)       # NEW</span>\n<span style="color: var(--accent-term);">import torch_xla.core.xla_model as xm         # NEW</span>\n\n<span style="color: var(--accent-term);">device = xm.xla_device()                      # CHANGED (was "cuda")</span>\nmodel = EsmForProteinFolding.from_pretrained(_MODEL_ID).to(device)\nwith torch.no_grad():\n    output = model(**inputs)</code></pre>' },
+            { body: 'Researchers are familiar with PyTorch. [TorchTPU](https://developers.googleblog.com/torchtpu-running-pytorch-natively-on-tpus-at-google-scale/) runs it natively on TPU, with ordinary PyTorch tensors and no wrappers. In Google\'s testing, **69% of 4,300+ Hugging Face models ran with zero code changes**. It\'s been [public](https://github.com/google-pytorch/torch_tpu) since October 19: `pip install torch-tpu`.\n\n{examples:tpu3}\n\n```python\ndef device_for(name):\n    if name == "tpu":           # NEW\n        import torch_tpu        # NEW\n    return torch.device(name)   # "tpu" or "cuda"\n```' },
           ] :
           phase === 'models1' ? [
-            { body: 'In the <a href="https://www.nature.com/nature-index/research-leaders/2025/institution/corporate/all/global" target="_blank">Nature Index corporate research rankings</a>, <b>Alphabet is #3 globally</b>, behind only Roche and AstraZeneca. <b>Microsoft is #27. Amazon is #90.</b> Google publishes <b>300+ health publications a year, 15+ in JAMA, 50+ in Nature</b>.\n\n<b>Science model catalog:</b>\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://deepmind.google/technologies/alphafold/" target="_blank"><b>AlphaFold</b></a> — Nobel Prize in Chemistry 2024 (John Jumper). <a href="https://deepmind.google/blog/alphafold-five-years-of-impact/" target="_blank">Used by 3 million researchers across 190+ countries as of Q1 2026</a>, the most-cited tool in life-science AI history.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://deepmind.google/science/alphagenome/" target="_blank"><b>AlphaGenome</b></a> — predicts 5,930 human genome tracks across diverse cell types and 11 output modalities. Cracks the 98% of non-coding DNA that no prior model could meaningfully interpret.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://research.google/blog/accelerating-scientific-breakthroughs-with-an-ai-co-scientist/" target="_blank"><b>AI Co-Scientist</b></a> — proposed the same antimicrobial-resistance hypothesis Prof. José Penadés\' Imperial College lab had reached through a decade of bench work — in hours, not years, which Stanford\'s Gary Peltz, who used it to identify the cancer drug Vorinostat as a liver-fibrosis candidate, <a href="https://www.technologyreview.com/2026/05/22/1137813/google-i-o-showed-how-the-path-for-ai-science-is-shifting/" target="_blank">called <i>"consulting the oracle of Delphi"</i></a> (<a href="https://www.cell.com/cell/fulltext/S0092-8674(25)00973-0" target="_blank"><i>Cell</i>, Sep 2025</a>; <a href="https://advanced.onlinelibrary.wiley.com/doi/10.1002/advs.202508751" target="_blank"><i>Advanced Science</i>, Sep 2025</a>).</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://blog.google/innovation-and-ai/technology/research/gemini-for-science-io-2026/" target="_blank"><b>ERA (Empirical Research Assistance)</b></a> — beat the CDC\'s own COVID-19 hospitalization forecasting ensemble in head-to-head benchmarks (<a href="https://www.nature.com/articles/s41586-026-10658-6" target="_blank"><i>Nature</i>, May 2026</a>).</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://deepmind.google/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/" target="_blank"><b>AlphaEvolve</b></a> — agentic research engine that generates and scores thousands of algorithm variations in parallel. Manufacturing companies are using it in production to accelerate supply-chain decisions across global networks.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://deepmind.google/science/weathernext/" target="_blank"><b>WeatherNext</b></a> — highlighted in I/O keynote as providing advance landfall warning for Hurricane Melissa to Jamaica that likely saved lives.</li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><a href="https://github.com/google/deepvariant" target="_blank"><b>DeepVariant</b></a>, <a href="https://developers.google.com/health-ai-developer-foundations/txgemma/model-card" target="_blank"><b>TxGemma-9B</b></a>, <a href="https://developers.google.com/health-ai-developer-foundations/medsiglip/model-card" target="_blank"><b>MedSigLIP</b></a>, <a href="https://deepmind.google/blog/alphaearth-foundations-helps-map-our-planet-in-unprecedented-detail/" target="_blank"><b>AlphaEarth Foundations</b></a>, and many more — variant calling, therapeutic LLM, medical multimodal, environmental sensing.</li></ul>' },
-          ] :
-          phase === 'models2' ? [
-            { body: 'James Manyika and Pushmeet Kohli launched an agentic platform aimed at automating the most labor-intensive phases of research, called <a href="https://blog.google/innovation-and-ai/technology/research/gemini-for-science-io-2026/" target="_blank">Gemini for Science</a>. Register at <a href="https://labs.google/science" target="_blank">labs.google/science</a>.\n\n<ul style="margin: 8px 0; padding-left: 18px; list-style-type: none;"><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Hypothesis Generation</b> (built on Co-Scientist) — multi-agent <i>"idea tournament"</i> where hypotheses are generated, debated, and verified with clickable citations.</li><li style="margin-bottom: 10px; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Computational Discovery</b> (built on AlphaEvolve + ERA) — parallel code-variant search for scientific simulation.</li><li style="margin-bottom: 0; padding-left: 12px; border-left: 2px solid #2a2a2a;"><b>Literature Insights</b> — agentic synthesis across the published corpus.</li></ul>\n<a href="https://github.com/google-deepmind/science-skills" target="_blank"><b>Science Skills</b></a> is a bundle that connects <a href="https://antigravity.google/" target="_blank"><b>Google Antigravity</b></a> agents to <b>30+ life-science databases</b>: UniProt, AlphaFold Database, AlphaGenome API, InterPro, and more. In Google\'s internal validation, a structural bioinformatics analysis on the <b>AK2 gene</b> that normally takes hours completed in <b>minutes</b>, surfacing new disease mechanism candidates. For your structural biologists, this collapses days of manual workflow into a single prompt.' },
-          ] :
-          phase === 'models3' ? [
-            { body: 'Academic medical precedents for AI infrastructure: <a href="https://cloud.google.com/customers/chop" target="_blank">CHOP</a> (Trillium TPUs for 1.6M pediatric patients), <a href="https://www.cmu.edu/news/stories/archives/2025/March/google-partnership" target="_blank">CMU</a>, <a href="https://www.purdue.edu/newsroom/2026/Q1/purdue-and-google-public-sector-partner-to-scale-ai-integration-and-accelerate-education-and-research-across-the-institution/" target="_blank">Purdue</a> (256-chip TPU pod with Slurm), SUNY (64 campuses), <a href="https://www.odu.edu/article/old-dominion-university-and-google-launch-a-first-of-its-kind-ai-incubator-for-higher" target="_blank">ODU</a>.\n\nGoogle invented the technological substrate underneath all of this: the <a href="https://arxiv.org/abs/1706.03762" target="_blank">Transformer</a>, <a href="https://www.tensorflow.org/" target="_blank">TensorFlow</a>, <a href="https://kubernetes.io/" target="_blank">Kubernetes</a>, <a href="https://jax.readthedocs.io/" target="_blank">JAX</a>. The infrastructure we walked through today — Slurm-burst, TPU, Hyperdisk ML, Falcon, Multi-Tier Checkpointing — exists because the science layer above demands it. Your institution gets both halves of the stack from a single vendor with the deepest scientific publication record in the industry.' },
-          ] :
-          phase === 'pse' ? [
-            { body: 'PSSA (Public Sector Subscription Agreement) provides fixed-price predictability for government and higher education. Unlike consumption-based billing, PSSA locks in pricing for a committed term with no usage surprises — a single fixed annual line item that maps to how institutional HPC is already funded, with no per-researcher metering.\n\n<a href="https://cloud.google.com/edu/researchers" target="_blank">GPAR (Google Public Sector Program for Accelerated Research)</a> is the research-side credit framing that complements PSSA. In production with SUNY, ODU, Purdue, and CMU.\n\nFor NIH-funded institutions, both sit under <a href="https://datascience.nih.gov/strides" target="_blank">STRIDES</a> — the NIH framework Google has been the <a href="https://www.hpcwire.com/2018/07/31/google-is-first-partner-in-nihs-strides-effort-to-speed-discovery-in-the-cloud/" target="_blank">first commercial cloud partner under since 2018</a>. Eight years of co-design with NIH on how cloud research procurement works for institutional budgets.' },
+            { body: 'ESMFold predicted the structure on the right on a Cloud TPU during this talk. In the [Nature Index 2026 corporate research rankings](https://www.nature.com/nature-index/research-leaders/2026/institution/corporate/all/global), **Alphabet ranks #5 globally and first among cloud providers**. **Microsoft ranks #26. Amazon ranks #55.**\n\n**Science model catalog:**\n\n- [**AlphaFold**](https://deepmind.google/science/alphafold/) — Nobel Prize in Chemistry 2024 (John Jumper). [Used by 3 million researchers across 190+ countries as of Q1 2026](https://deepmind.google/blog/alphafold-five-years-of-impact/).\n- [**AlphaGenome**](https://deepmind.google/science/alphagenome/) — predicts 5,930 human genome tracks across diverse cell types and 11 output modalities. Cracks the 98% of non-coding DNA that no prior model could meaningfully interpret.\n- [**AI Co-Scientist**](https://research.google/blog/accelerating-scientific-breakthroughs-with-an-ai-co-scientist/) — proposed the same antimicrobial-resistance hypothesis Prof. José Penadés\' Imperial College lab had reached through a decade of bench work — in hours, not years, which Stanford\'s Gary Peltz, who used it to identify the cancer drug Vorinostat as a liver-fibrosis candidate, [called *"consulting the oracle of Delphi"*](https://www.technologyreview.com/2026/05/22/1137813/google-i-o-showed-how-the-path-for-ai-science-is-shifting/) ([*Cell*, Sep 2025](https://www.cell.com/cell/fulltext/S0092-8674(25)00973-0); [*Advanced Science*, Sep 2025](https://advanced.onlinelibrary.wiley.com/doi/10.1002/advs.202508751)).\n- [**ERA (Empirical Research Assistance)**](https://blog.google/innovation-and-ai/technology/research/gemini-for-science-io-2026/) — beat the CDC\'s own COVID-19 hospitalization forecasting ensemble in head-to-head benchmarks ([*Nature*, May 2026](https://www.nature.com/articles/s41586-026-10658-6)).\n- [**AlphaEvolve**](https://deepmind.google/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/) — agentic research engine that generates and scores thousands of algorithm variations in parallel. Manufacturing companies are using it in production to accelerate supply-chain decisions across global networks.\n- [**WeatherNext**](https://deepmind.google/science/weathernext/) — highlighted in I/O keynote as providing advance landfall warning for Hurricane Melissa to Jamaica that likely saved lives.\n- [**MedGemma**](https://developers.google.com/health-ai-developer-foundations/medgemma/model-card) (3D CT and MRI from version 1.5) and [**MedSigLIP**](https://developers.google.com/health-ai-developer-foundations/medsiglip/model-card) — open medical models for imaging work.\n- [**DeepVariant**](https://github.com/google/deepvariant), [**TxGemma-9B**](https://developers.google.com/health-ai-developer-foundations/txgemma/model-card), [**AlphaEarth Foundations**](https://deepmind.google/blog/alphaearth-foundations-helps-map-our-planet-in-unprecedented-detail/), and many more — variant calling, therapeutic LLM, environmental sensing.' },
           ] :
           [
             { body: 'Inference complete — results content TBD.' },

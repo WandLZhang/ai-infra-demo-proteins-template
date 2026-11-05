@@ -6,15 +6,17 @@ interface SideLadderProps {
   lanes: Record<BackendId, LaneStatus>
   onSelect: (id: BackendId) => void
   /** Backends to apply a cyan pulse halo to (e.g. all TPU on tpu2, or
-   *  esmfold-tpu + esmfold-gpu on tpu3 for the TorchTPU diff slide). */
+   *  esmfold-tpu + esmfold-gpu on tpu3 for the TorchTPU slide). */
   highlightBackends?: BackendId[]
+  /** Show the ' · best' and ' · N×' cost tags. They wait for the TPU slides. */
+  showCostRatio: boolean
 }
 
 function stateLabel(state: string): string {
   switch (state) {
     case 'idle': return 'ready'
     case 'queued': return 'queued'
-    // A lane reaches this state on whichever partition took the job, Spot or standard.
+    // Lanes reach this state on a standard node after the Spot failover.
     case 'allocating': return 'allocating'
     case 'pulling': return 'pulling container'
     case 'loading': return 'loading model'
@@ -25,7 +27,7 @@ function stateLabel(state: string): string {
   }
 }
 
-export default function SideLadder({ lanes, onSelect, highlightBackends }: SideLadderProps) {
+export default function SideLadder({ lanes, onSelect, highlightBackends, showCostRatio }: SideLadderProps) {
   const highlightSet = new Set(highlightBackends ?? [])
   const pairId = (id: string) => {
     const [model, silicon] = [id.replace(/-tpu$|-gpu$/, ''), id.endsWith('-tpu') ? 'tpu' : 'gpu']
@@ -41,7 +43,7 @@ export default function SideLadder({ lanes, onSelect, highlightBackends }: SideL
         const counterpart = lanes[counterpartId]
         const bothDone = lane.state === 'done' && counterpart?.state === 'done' && cost > 0 && counterpart.costAccumulated > 0
         const pairCheapest = bothDone ? Math.min(cost, counterpart.costAccumulated) : null
-        const ratio = pairCheapest ? cost / pairCheapest : null
+        const ratio = showCostRatio && pairCheapest ? cost / pairCheapest : null
 
         let borderColor = 'rgba(255, 255, 255, 0.2)'
         if (lane.state !== 'idle' && lane.state !== 'done' && lane.state !== 'failed') {

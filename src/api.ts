@@ -61,6 +61,20 @@ export interface SlurmEvent {
   _name?: string
 }
 
+/** The shared backend's current job/manifest.json: which protein, and when the run started. */
+export async function getManifest(): Promise<{ protein_id?: string, submitted_at?: string } | null> {
+  try {
+    return await fetchGcsJson('job/manifest.json')
+  } catch {
+    return null
+  }
+}
+
+/** submitted_at of the shared backend's current job/manifest.json. */
+export async function getManifestSubmittedAt(): Promise<string | null> {
+  return (await getManifest())?.submitted_at ?? null
+}
+
 const ALL_BACKENDS: BackendId[] = [
   'af2-tpu', 'af2-gpu', 'esmfold-tpu', 'esmfold-gpu', 'boltz2-tpu', 'boltz2-gpu',
 ]

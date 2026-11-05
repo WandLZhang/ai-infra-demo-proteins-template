@@ -86,18 +86,17 @@ export interface ZoneInfo {
 }
 
 
+// us-west8 and us-east7 are left off: neither shows in `gcloud compute regions list` for the burst project.
 export const ZONE_LOCATIONS: ZoneInfo[] = [
   { id: 'us-west1',    lat: 45.6015, lng: -121.1842, label: 'us-west1',    backends: ['af2-gpu', 'esmfold-gpu', 'boltz2-gpu'] },
   { id: 'us-west2',    lat: 34.0537, lng: -118.2428, label: 'us-west2',    backends: [] },
   { id: 'us-west3',    lat: 40.7596, lng: -111.8868, label: 'us-west3',    backends: [] },
   { id: 'us-west4',    lat: 36.1674, lng: -115.1484, label: 'us-west4',    backends: [] },
-  { id: 'us-west8',    lat: 33.4484, lng: -112.0741, label: 'us-west8',    backends: [] },
   { id: 'us-central1', lat: 41.2588, lng:  -95.8519, label: 'us-central1', backends: ['af2-tpu', 'esmfold-tpu', 'boltz2-tpu', 'af2-gpu', 'esmfold-gpu', 'boltz2-gpu'] },
   { id: 'us-south1',   lat: 32.7763, lng:  -96.7969, label: 'us-south1',   backends: [] },
   { id: 'us-east1',    lat: 33.1960, lng:  -80.0131, label: 'us-east1',    backends: [] },
   { id: 'us-east4',    lat: 39.0298, lng:  -77.4744, label: 'us-east4',    backends: [] },
   { id: 'us-east5',    lat: 39.9623, lng:  -83.0007, label: 'us-east5',    backends: ['af2-tpu', 'esmfold-tpu', 'boltz2-tpu'] },
-  { id: 'us-east7',    lat: 35.2272, lng:  -80.8431, label: 'us-east7',    backends: [] },
 ]
 
 interface InfraMapProps {
@@ -115,6 +114,23 @@ interface InfraMapProps {
   showHyperdiskHub?: boolean
   showPartitionChips?: boolean
   showSliceViz?: boolean
+  showMemberSites?: boolean
+}
+
+// A consortium member campus: a static dot and label, no spinner. The spinner stays reserved
+// for the home login node, the one site that actually submits the live run.
+function SiteMarker({ position, label, subtitle }: { position: google.maps.LatLngLiteral, label: string, subtitle?: string }) {
+  return (
+    <OverlayView position={position} mapPaneName={OverlayView.OVERLAY_MOUSE_TARGET}>
+      <div className="zone-marker-wrap marker-done" style={{ cursor: 'default' }}>
+        <div style={{ width: 9, height: 9, borderRadius: '50%', background: 'var(--accent)', boxShadow: '0 0 0 3px var(--accent-weak)', flexShrink: 0 }} />
+        <div className="marker-text-box">
+          <b>{label}</b>
+          {subtitle && <span style={{ display: 'block', fontSize: '0.75em', color: '#708090', marginTop: 1 }}>{subtitle}</span>}
+        </div>
+      </div>
+    </OverlayView>
+  )
 }
 
 // us-central1 (Council Bluffs, IA) — anchor for the MD russian-doll overlay.
@@ -144,7 +160,7 @@ const US_FEATURE_STYLE: google.maps.FeatureStyleOptions = {
   strokeWeight: 1.2,
 }
 
-export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, center, zoom, homePosition, highlightUS, showSpokes, showHalos, mdLayer, showHyperdiskHub, showPartitionChips, showSliceViz }: InfraMapProps) {
+export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, center, zoom, homePosition, highlightUS, showSpokes, showHalos, mdLayer, showHyperdiskHub, showPartitionChips, showSliceViz, showMemberSites }: InfraMapProps) {
   const { config } = useConfig()
   const { isLoaded, loadError } = useJsApiLoader({ googleMapsApiKey: MAPS_API_KEY, libraries: MAPS_LIBRARIES })
 
@@ -181,16 +197,22 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
     }
   }, [showHyperdiskHub])
 
+  // Counts loaded map instances. A run link can leave home before the Maps script loads, so the camera
+  // effect below runs again once both maps exist.
+  const [mapsLoaded, setMapsLoaded] = React.useState(0)
+
   const onLoadA = useCallback((m: google.maps.Map) => {
     mapARef.current = m
     m.setZoom(initialZoom)
     m.setCenter(initialCenter)
+    setMapsLoaded(n => n + 1)
   }, [initialZoom, initialCenter])
 
   const onLoadB = useCallback((m: google.maps.Map) => {
     mapBRef.current = m
     m.setZoom(initialZoom)
     m.setCenter(initialCenter)
+    setMapsLoaded(n => n + 1)
   }, [initialZoom, initialCenter])
 
   // Reachability spokes — cyan dashed lines from the bucket label out to each US zone, with the
@@ -316,7 +338,7 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
       timersRef.current.forEach(t => clearTimeout(t))
       timersRef.current = []
     }
-  }, [center.lat, center.lng, zoom])
+  }, [center.lat, center.lng, zoom, mapsLoaded])
 
   // A blocked Maps script (proxy, bad key, missing referrer) sets loadError and leaves isLoaded
   // false forever. Say so instead of showing "Loading map..." for the rest of the talk.
@@ -349,7 +371,7 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
       {highlightUS && (
         <OverlayView position={US_BUCKET_LABEL_POSITION} mapPaneName={OverlayView.FLOAT_PANE}>
           <div className="bucket-label">
-            <div className="bucket-label-name">{`gs://${config.institution.shortName.toLowerCase().replace(/\s+/g, '-')}-research`}</div>
+            <div className="bucket-label-name">{config.home.displayBucket}</div>
             <div className="bucket-label-meta">US Multi-Region · Cloud Storage</div>
           </div>
         </OverlayView>
@@ -387,10 +409,13 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
           </div>
         </OverlayView>
       )}
+      {showMemberSites && (config.memberSites ?? []).map(s => (
+        <SiteMarker key={s.label} position={{ lat: s.lat, lng: s.lng }} label={s.label} subtitle={s.subtitle} />
+      ))}
       <ZoneMarker
         key="home"
         position={homePosition}
-        label={config.institution.shortName.toUpperCase()}
+        label={config.home.markerLabel || config.institution.shortName.toUpperCase()}
         subtitle={config.home.markerSubtitle}
         subtitleHref={config.home.controllerConsoleHref}
         state="done"
@@ -425,7 +450,7 @@ export default function InfraMap({ lanes, zoneStates, vmStates, onZoneClick, cen
           <div className="md-doll-outer" data-visible={mdLayerReady === 'topology'}>
             <div className="md-doll-label">CLUSTER &middot; BLOCK &middot; RACK</div>
             <div className="md-doll-middle" data-visible={mdLayerReady === 'compute' || mdLayerReady === 'topology'}>
-              <div className="md-doll-label">H4D &middot; 192 vCPU &middot; 200 GBPS FALCON</div>
+              <div className="md-doll-label">H4D &middot; 192 CORES &middot; 200 GBPS FALCON</div>
               <div className="md-doll-inner">
                 <div className="md-doll-storage">
                   <div className="md-doll-storage-hero">10 TB/s</div>
